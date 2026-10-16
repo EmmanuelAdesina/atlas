@@ -18,10 +18,14 @@ class TeamStats(BaseModel):
     goals: Optional[int] = None
     possession_pct: Optional[float] = None
     shots_on_target: Optional[int] = None
+    shots_total: Optional[int] = None
+    saves: Optional[int] = None
     corners: Optional[int] = None
     yellow_cards: Optional[int] = None
     red_cards: Optional[int] = None
     fouls: Optional[int] = None
+    free_kicks: Optional[int] = None
+    offsides: Optional[int] = None
 
 
 class LiveMatchState(BaseModel):
@@ -40,9 +44,12 @@ class LiveMatchState(BaseModel):
     )
     half_home_goals: Optional[int] = None
     half_away_goals: Optional[int] = None
+    substitutions_count: Optional[int] = None
+    added_minutes_announced: Optional[int] = None
     remaining_unknown: bool = Field(
         default=False, description="True when stoppage length / whistle timing is unknown"
     )
+    account_balance_ngn: Optional[float] = None
     observed_at: datetime = Field(description="When Atlas observed this (UTC)")
     source: str = Field(description="e.g. 'sportybet_browser'")
     source_url: str = ""

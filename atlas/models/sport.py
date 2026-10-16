@@ -54,7 +54,25 @@ class SportMarket(BaseModel):
         """Sum of implied probs; 1.0 = no margin. ~1.07-1.09 typical here."""
         return sum(s.implied for s in self.selections)
 
-    def fair_probs(self) -> dict[str, float]:
-        """De-vigged probabilities: implied / overround."""
+    def fair_probs(self, method: str = "proportional") -> dict[str, float]:
+        """De-vigged probabilities via 'proportional', 'shin', or 'power'."""
+        odds_map = {s.name: s.odds for s in self.selections}
+        if method == "shin":
+            from atlas.live.math_engine import devig_shin
+
+            probs, _ = devig_shin(odds_map)
+            return probs
+        if method == "power":
+            from atlas.live.math_engine import devig_power
+
+            return devig_power(odds_map)
         total = self.overround
         return {s.name: s.implied / total for s in self.selections}
+
+    @property
+    def shin_z(self) -> float:
+        """Estimated Shin (1993) adverse-selection / insider fraction z in [0, 1)."""
+        from atlas.live.math_engine import devig_shin
+
+        _, z = devig_shin({s.name: s.odds for s in self.selections})
+        return z

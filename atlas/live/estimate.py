@@ -1,16 +1,20 @@
-"""Probability interface + narrow baseline model family.
+"""Probability interface + narrow baseline + coherent state-space goal surface model.
 
 The AI never invents probabilities. A MarketModel receives the current
 LiveMatchState plus the observed market and returns an Estimate carrying
-the probability, a confidence grade, evidence freshness, and — crucially —
-an abstain reason whenever the evidence cannot support a number.
+the probability, uncertainty bounds [p_lower, p_upper], a confidence grade,
+evidence freshness, and — crucially — an abstain reason whenever the evidence
+cannot support a number.
 
-Baseline scope (deliberately narrow): late-match 'no more goals' for
-Under selections. Constant-rate Poisson with an explicitly labeled assumed
-rate, confidence capped at 'low' whenever the rate is assumed rather than
-match-measured or remaining time is uncertain. A 'low' confidence can
-never clear the betting policy in decisions.py — the baseline informs and
-calibrates, it does not trigger stakes by itself.
+Models provided:
+  1. `NoMoreGoalsBaseline` — deliberately narrow Under-only constant-rate
+     Poisson baseline (confidence capped at 'low' whenever rate or stoppage
+     length is assumed).
+  2. `LiveStateSpaceModel` — coherent time-inhomogeneous Bivariate Poisson /
+     Dixon-Coles state-space surface model with piecewise clock hazard,
+     Bayesian live-statistics shrinkage, Markov red-card & score-state
+     multipliers, and 7-point sigma uncertainty propagation across 14+
+     SportyBet market families.
 """
 
 from __future__ import annotations
@@ -20,20 +24,37 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional, Protocol
 
+from atlas.live.math_engine import (
+    _smooth_positive_residual,
+    build_remaining_score_matrix,
+    compute_matrix_marginals,
+    compute_posterior_intensities,
+    effective_hazard_fraction,
+    estimate_remaining_minutes,
+    expected_value_detailed,
+    price_from_joint_matrix,
+)
 from atlas.live.observe import LiveMatchState
 
 
 def _second_half_score(state: LiveMatchState) -> Optional[tuple[int, int]]:
-    if (state.home.goals is None or state.away.goals is None
-            or state.half_home_goals is None or state.half_away_goals is None):
+    if (
+        state.home.goals is None
+        or state.away.goals is None
+        or state.half_home_goals is None
+        or state.half_away_goals is None
+    ):
         return None
-    return (state.home.goals - state.half_home_goals,
-            state.away.goals - state.half_away_goals)
+    return (
+        state.home.goals - state.half_home_goals,
+        state.away.goals - state.half_away_goals,
+    )
 
 
 @dataclass
 class ImplicationRule:
     """If antecedent occurs then consequent must occur (given `when`)."""
+
     antecedent: tuple[str, str]
     consequent: tuple[str, str]
     when: str  # human-readable validity condition
@@ -41,18 +62,102 @@ class ImplicationRule:
 
 def _rule_conditions() -> list[tuple[ImplicationRule, Any]]:
     return [
-        (ImplicationRule(("ou_1_5", "Under 1.5"), ("1x2_2h", "Away"),
-                         "2h with away leading the half: no more goals keeps 2H 0:1"),
-         lambda s: s.period == "2h" and (_second_half_score(s) or (0, 0))[1] > (_second_half_score(s) or (0, 0))[0]),
-        (ImplicationRule(("ou_1_5", "Under 1.5"), ("ou_2_5", "Under 2.5"),
-                         "total <= 1 implies total <= 2 (no state needed)"),
-         lambda s: True),
+        (
+            ImplicationRule(
+                ("ou_1_5", "Under 1.5"),
+                ("1x2_2h", "Away"),
+                "2h with away leading the half: no more goals keeps 2H 0:1",
+            ),
+            lambda s: s.period == "2h"
+            and (_second_half_score(s) or (0, 0))[1]
+            > (_second_half_score(s) or (0, 0))[0],
+        ),
+        (
+            ImplicationRule(
+                ("ou_1_5", "Under 1.5"),
+                ("ou_2_5", "Under 2.5"),
+                "total <= 1 implies total <= 2 (no state needed)",
+            ),
+            lambda s: True,
+        ),
+        (
+            ImplicationRule(
+                ("ou_0_5", "Under 0.5"),
+                ("ou_1_5", "Under 1.5"),
+                "total == 0 implies total <= 1",
+            ),
+            lambda s: True,
+        ),
+        (
+            ImplicationRule(
+                ("ou_2_5", "Under 2.5"),
+                ("ou_3_5", "Under 3.5"),
+                "total <= 2 implies total <= 3",
+            ),
+            lambda s: True,
+        ),
+        (
+            ImplicationRule(
+                ("ou_3_5", "Under 3.5"),
+                ("ou_4_5", "Under 4.5"),
+                "total <= 3 implies total <= 4",
+            ),
+            lambda s: True,
+        ),
+        (
+            ImplicationRule(
+                ("ou_2_5", "Over 2.5"),
+                ("ou_1_5", "Over 1.5"),
+                "total >= 3 implies total >= 2",
+            ),
+            lambda s: True,
+        ),
+        (
+            ImplicationRule(
+                ("btts", "Yes"),
+                ("ou_1_5", "Over 1.5"),
+                "both teams scoring >= 1 implies total goals >= 2",
+            ),
+            lambda s: True,
+        ),
+        (
+            ImplicationRule(
+                ("ou_1_5", "Under 1.5"),
+                ("1x2", "Away"),
+                "score 0:1: staying under 1.5 implies Away wins FT",
+            ),
+            lambda s: s.home.goals == 0 and s.away.goals == 1,
+        ),
+        (
+            ImplicationRule(
+                ("ou_1_5", "Under 1.5"),
+                ("next_goal", "None"),
+                "score total == 1: staying under 1.5 implies no 2nd goal",
+            ),
+            lambda s: s.score_total == 1,
+        ),
+        (
+            ImplicationRule(
+                ("1x2", "Home"),
+                ("double_chance", "Home or Draw"),
+                "Home win implies Home or Draw (1X)",
+            ),
+            lambda s: True,
+        ),
+        (
+            ImplicationRule(
+                ("1x2", "Away"),
+                ("double_chance", "Draw or Away"),
+                "Away win implies Draw or Away (X2)",
+            ),
+            lambda s: True,
+        ),
     ]
 
 
-def check_implications(state: LiveMatchState,
-                       fair: dict[tuple[str, str], float],
-                       tol: float = 0.02) -> list[dict]:
+def check_implications(
+    state: LiveMatchState, fair: dict[tuple[str, str], float], tol: float = 0.02
+) -> list[dict]:
     """Verify fair P(consequent) >= fair P(antecedent) for each valid rule.
 
     `fair` maps (market_key, selection) -> de-vigged probability. Markets
@@ -71,13 +176,16 @@ def check_implications(state: LiveMatchState,
             results.append({"rule": rule, "status": "skipped-suspended"})
             continue
         pa, pc = fair[rule.antecedent], fair[rule.consequent]
-        results.append({
-            "rule": rule,
-            "status": "consistent" if pc + tol >= pa else "VIOLATION",
-            "p_antecedent": pa,
-            "p_consequent": pc,
-        })
+        results.append(
+            {
+                "rule": rule,
+                "status": "consistent" if pc + tol >= pa else "VIOLATION",
+                "p_antecedent": pa,
+                "p_consequent": pc,
+            }
+        )
     return results
+
 
 Confidence = str  # 'high' | 'medium' | 'low'
 
@@ -89,18 +197,47 @@ class Estimate:
     model_name: str
     evidence_age_s: Optional[float] = None
     abstain_reason: Optional[str] = None
+    p_lower: Optional[float] = None
+    p_upper: Optional[float] = None
+    p_push: float = 0.0
+    p_half_win: float = 0.0
+    p_half_loss: float = 0.0
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def abstained(self) -> bool:
         return self.p is None
 
+    def expected_value(self, odds: float) -> Optional[float]:
+        if self.p is None:
+            return None
+        return expected_value_detailed(
+            odds,
+            p_win=self.p,
+            p_push=self.p_push,
+            p_half_win=self.p_half_win,
+            p_half_loss=self.p_half_loss,
+        )
+
+    def conservative_expected_value(self, odds: float) -> Optional[float]:
+        p_low = self.p_lower if self.p_lower is not None else self.p
+        if p_low is None:
+            return None
+        return expected_value_detailed(
+            odds,
+            p_win=p_low,
+            p_push=self.p_push,
+            p_half_win=self.p_half_win,
+            p_half_loss=self.p_half_loss,
+        )
+
 
 class MarketModel(Protocol):
     model_name: str
 
-    def estimate(self, state: LiveMatchState, market_key: str,
-                 selection: str) -> Estimate:
-        ...
+    def estimate(
+        self, state: LiveMatchState, market_key: str, selection: str
+    ) -> Estimate: ...
 
 
 # Selections this baseline family may evaluate: {market_key: {selection}}.
@@ -130,32 +267,298 @@ class NoMoreGoalsBaseline:
     max_evidence_age_s: float = 60.0
     now: Optional[datetime] = None  # replay hook: evaluate freshness as-of this time
 
-    def estimate(self, state: LiveMatchState, market_key: str,
-                 selection: str) -> Estimate:
+    def estimate(
+        self, state: LiveMatchState, market_key: str, selection: str
+    ) -> Estimate:
         allowed_map = BASELINE_UNDER_SELECTIONS.get(market_key)
         if allowed_map is None or selection not in allowed_map:
-            return Estimate(None, "low", self.model_name,
-                            abstain_reason=f"market {market_key}/{selection} outside baseline family")
+            return Estimate(
+                None,
+                "low",
+                self.model_name,
+                abstain_reason=f"market {market_key}/{selection} outside baseline family",
+            )
         if not state.is_live:
-            return Estimate(None, "low", self.model_name,
-                            abstain_reason=f"match not live (period={state.period})")
+            return Estimate(
+                None,
+                "low",
+                self.model_name,
+                abstain_reason=f"match not live (period={state.period})",
+            )
         age = state.age_seconds(self.now or datetime.now(timezone.utc))
         if age > self.max_evidence_age_s:
-            return Estimate(None, "low", self.model_name, evidence_age_s=age,
-                            abstain_reason=f"stale evidence ({age:.0f}s > {self.max_evidence_age_s:.0f}s)")
+            return Estimate(
+                None,
+                "low",
+                self.model_name,
+                evidence_age_s=age,
+                abstain_reason=f"stale evidence ({age:.0f}s > {self.max_evidence_age_s:.0f}s)",
+            )
         if state.clock_minute is None or state.score_total is None:
-            return Estimate(None, "low", self.model_name, evidence_age_s=age,
-                            abstain_reason="clock or score unknown")
+            return Estimate(
+                None,
+                "low",
+                self.model_name,
+                evidence_age_s=age,
+                abstain_reason="clock or score unknown",
+            )
         goals_allowed = allowed_map[selection] - state.score_total
         if goals_allowed < 0:
-            return Estimate(0.0, "high", self.model_name, evidence_age_s=age)
-        mu = self.assumed_rate_per_min * max(0.0, 90.0 + 5.0 - state.clock_minute)
-        # Remaining-time guess (90+5') is itself uncertain -> cap confidence.
-        p = sum(math.exp(-mu) * mu**k / math.factorial(k)
-                for k in range(goals_allowed + 1))
+            return Estimate(
+                0.0,
+                "high",
+                self.model_name,
+                evidence_age_s=age,
+                p_lower=0.0,
+                p_upper=0.0,
+            )
+        # Preserve exact 95.0 - clock_minute linear formula before 94.5' for
+        # backward-compatible baseline tests, while preventing zero collapse
+        # if clock_minute >= 95.0 via smooth positive residual tail.
+        raw_rem = 90.0 + 5.0 - state.clock_minute
+        rem_mins = raw_rem if raw_rem >= 0.5 else _smooth_positive_residual(raw_rem, 0.5)
+        mu = self.assumed_rate_per_min * rem_mins
+        p = sum(
+            math.exp(-mu) * mu**k / math.factorial(k)
+            for k in range(goals_allowed + 1)
+        )
+        # Compute conservative lower/upper bounds under stoppage uncertainty [rem - 1.5, rem + 2.0]
+        mu_hi = self.assumed_rate_per_min * (rem_mins + 2.0)
+        mu_lo = self.assumed_rate_per_min * max(0.2, rem_mins - 1.0)
+        p_low = sum(
+            math.exp(-mu_hi) * mu_hi**k / math.factorial(k)
+            for k in range(goals_allowed + 1)
+        )
+        p_high = sum(
+            math.exp(-mu_lo) * mu_lo**k / math.factorial(k)
+            for k in range(goals_allowed + 1)
+        )
         reasons = ["assumed league-average rate", "stoppage length unknown"]
         if state.home_reds or state.away_reds:
             reasons.append("red-card state shifts rate (unmodeled)")
-        return Estimate(min(1.0, max(0.0, p)), "low", self.model_name,
-                        evidence_age_s=age,
-                        abstain_reason="low confidence: " + "; ".join(reasons))
+        return Estimate(
+            min(1.0, max(0.0, p)),
+            "low",
+            self.model_name,
+            evidence_age_s=age,
+            abstain_reason="low confidence: " + "; ".join(reasons),
+            p_lower=min(1.0, max(0.0, p_low)),
+            p_upper=min(1.0, max(0.0, p_high)),
+        )
+
+
+@dataclass
+class LiveStateSpaceModel:
+    """Coherent Bivariate Poisson / Dixon-Coles live state-space surface model.
+
+    Prices 14+ SportyBet market families from a single joint remaining-goals
+    distribution P(Delta G_H = i, Delta G_A = j) with:
+      - Non-linear piecewise clock hazard Lambda(t),
+      - Smooth survival stoppage-time estimation,
+      - Empirical Bayes live-stat shrinkage (shots on target, attempts, corners, possession),
+      - Markov red-card manpower & score-state hazard multipliers,
+      - 7-point sigma uncertainty propagation producing [p_lower, p, p_upper].
+    """
+
+    model_name: str = "live_state_space_bivariate_dc_v2"
+    prior_home_lambda: float = 1.42
+    prior_away_lambda: float = 1.18
+    prior_adj_home: float = 0.0
+    prior_adj_away: float = 0.0
+    dixon_coles_rho: float = -0.06
+    shared_tempo_frac: float = 0.05
+    intensity_rel_sigma: float = 0.16
+    max_evidence_age_s: float = 60.0
+    now: Optional[datetime] = None
+    _surface_cache: dict[tuple, Any] = field(default_factory=dict, repr=False)
+
+    def _get_surface(self, state: LiveMatchState, period_scope: str) -> tuple:
+        eff_scope = "2h" if state.period == "2h" else period_scope
+        cache_key = (
+            state.match_id,
+            state.period,
+            state.clock_minute,
+            state.home.goals,
+            state.away.goals,
+            state.half_home_goals,
+            state.half_away_goals,
+            state.home_reds,
+            state.away_reds,
+            state.home.shots_on_target,
+            state.away.shots_on_target,
+            state.home.corners,
+            state.away.corners,
+            state.remaining_unknown,
+            state.added_minutes_announced,
+            eff_scope,
+            self.prior_home_lambda,
+            self.prior_away_lambda,
+            self.prior_adj_home,
+            self.prior_adj_away,
+        )
+        cached = self._surface_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        assert state.clock_minute is not None
+        stoppage = estimate_remaining_minutes(state, period_scope=eff_scope)
+        post = compute_posterior_intensities(
+            state,
+            prior_home_lambda=self.prior_home_lambda,
+            prior_away_lambda=self.prior_away_lambda,
+            prior_adj_home=self.prior_adj_home,
+            prior_adj_away=self.prior_adj_away,
+        )
+
+        haz_mean = effective_hazard_fraction(
+            state.period, state.clock_minute, stoppage.rem_mean
+        )
+        haz_lo = effective_hazard_fraction(
+            state.period, state.clock_minute, stoppage.rem_lower
+        )
+        haz_hi = effective_hazard_fraction(
+            state.period, state.clock_minute, stoppage.rem_upper
+        )
+
+        mu_h = post.lambda_home_90 * haz_mean
+        mu_a = post.lambda_away_90 * haz_mean
+        max_g = 6 if (mu_h + mu_a) < 0.6 else 8
+
+        mat_nom = build_remaining_score_matrix(
+            mu_h,
+            mu_a,
+            rho=self.dixon_coles_rho,
+            shared_tempo_frac=self.shared_tempo_frac,
+            max_goals=max_g,
+        )
+        marg_nom = compute_matrix_marginals(mat_nom)
+        rel_s = self.intensity_rel_sigma
+        scenarios = [
+            (post.lambda_home_90 * haz_lo, post.lambda_away_90 * haz_lo),
+            (post.lambda_home_90 * haz_hi, post.lambda_away_90 * haz_hi),
+            (mu_h * (1.0 + rel_s), mu_a * (1.0 + rel_s)),
+            (mu_h * (1.0 - rel_s), mu_a * (1.0 - rel_s)),
+            (mu_h * (1.0 + rel_s), mu_a * (1.0 - rel_s)),
+            (mu_h * (1.0 - rel_s), mu_a * (1.0 + rel_s)),
+        ]
+        scenario_mats = []
+        for s_mu_h, s_mu_a in scenarios:
+            s_mat = build_remaining_score_matrix(
+                s_mu_h,
+                s_mu_a,
+                rho=self.dixon_coles_rho,
+                shared_tempo_frac=self.shared_tempo_frac,
+                max_goals=max_g,
+            )
+            scenario_mats.append(
+                (s_mu_h, s_mu_a, s_mat, compute_matrix_marginals(s_mat))
+            )
+        bundle = (stoppage, post, mu_h, mu_a, mat_nom, marg_nom, scenario_mats)
+        self._surface_cache[cache_key] = bundle
+        return bundle
+
+    def estimate(
+        self, state: LiveMatchState, market_key: str, selection: str
+    ) -> Estimate:
+        if not state.is_live:
+            return Estimate(
+                None,
+                "low",
+                self.model_name,
+                abstain_reason=f"match not live (period={state.period})",
+            )
+        age = state.age_seconds(self.now or datetime.now(timezone.utc))
+        if age > self.max_evidence_age_s:
+            return Estimate(
+                None,
+                "low",
+                self.model_name,
+                evidence_age_s=age,
+                abstain_reason=f"stale evidence ({age:.0f}s > {self.max_evidence_age_s:.0f}s)",
+            )
+        if state.clock_minute is None or state.score_total is None:
+            return Estimate(
+                None,
+                "low",
+                self.model_name,
+                evidence_age_s=age,
+                abstain_reason="clock or score unknown",
+            )
+
+        mkey = market_key.strip().lower()
+        period_scope = "1h" if "1h" in mkey else "2h" if "2h" in mkey else "full"
+        stoppage, post, mu_h, mu_a, mat_nom, marg_nom, scenario_mats = (
+            self._get_surface(state, period_scope)
+        )
+
+        nom_out = price_from_joint_matrix(
+            mat_nom, state, market_key, selection, mu_h, mu_a, marginals=marg_nom
+        )
+        if nom_out is None:
+            return Estimate(
+                None,
+                "low",
+                self.model_name,
+                evidence_age_s=age,
+                abstain_reason=f"market {market_key}/{selection} outside supported state-space families or missing period state",
+            )
+
+        win_samples = [nom_out.effective_win_prob]
+        for s_mu_h, s_mu_a, s_mat, s_marg in scenario_mats:
+            s_out = price_from_joint_matrix(
+                s_mat, state, market_key, selection, s_mu_h, s_mu_a, marginals=s_marg
+            )
+            if s_out is not None:
+                win_samples.append(s_out.effective_win_prob)
+
+        p_mean = min(1.0, max(0.0, nom_out.effective_win_prob))
+        p_lower = min(1.0, max(0.0, min(win_samples)))
+        p_upper = min(1.0, max(0.0, max(win_samples)))
+        width = p_upper - p_lower
+
+        # Determine confidence grade & transparent diagnostics
+        reasons: list[str] = []
+        if stoppage.stoppage_uncertainty_high and width > 0.005:
+            reasons.append(
+                f"unverified stoppage duration (rem={stoppage.rem_mean:.2f}m [{stoppage.rem_lower:.2f}m..{stoppage.rem_upper:.2f}m])"
+            )
+        if post.shrinkage_weight == 0.0:
+            reasons.append("no live shot/corner stats observed (prior-only intensity)")
+        if width > 0.16:
+            reasons.append(f"wide uncertainty interval ({width:.3f})")
+
+        if reasons:
+            confidence: Confidence = "low"
+            abstain_note: Optional[str] = "low confidence: " + "; ".join(reasons)
+        elif width <= 0.07 and post.shrinkage_weight >= 0.25:
+            confidence = "high"
+            abstain_note = None
+        else:
+            confidence = "medium"
+            abstain_note = None
+
+        diagnostics = {
+            "mu_home_rem": round(mu_h, 4),
+            "mu_away_rem": round(mu_a, 4),
+            "lambda_home_90": round(post.lambda_home_90, 4),
+            "lambda_away_90": round(post.lambda_away_90, 4),
+            "rem_minutes_mean": round(stoppage.rem_mean, 2),
+            "rem_minutes_bounds": [round(stoppage.rem_lower, 2), round(stoppage.rem_upper, 2)],
+            "red_card_mult": [round(post.red_card_multiplier_home, 3), round(post.red_card_multiplier_away, 3)],
+            "shrinkage_weight": round(post.shrinkage_weight, 3),
+            "uncertainty_width": round(width, 4),
+        }
+
+        return Estimate(
+            p=p_mean,
+            confidence=confidence,
+            model_name=self.model_name,
+            evidence_age_s=age,
+            abstain_reason=abstain_note,
+            p_lower=p_lower,
+            p_upper=p_upper,
+            p_push=nom_out.p_push,
+            p_half_win=nom_out.p_half_win,
+            p_half_loss=nom_out.p_half_loss,
+            diagnostics=diagnostics,
+        )
