@@ -1,0 +1,158 @@
+{
+ "competition": "3. Liga | Matchday 10",
+ "markets": [
+  {
+   "line": null,
+   "market_key": "1x2",
+   "market_label": "1X2",
+   "period": "full",
+   "selections": [],
+   "status": "suspended",
+   "match_id": "live-fortuna-stuttgart-20261016"
+  },
+  {
+   "line": 1.5,
+   "market_key": "ou_1_5",
+   "market_label": "Over/Under",
+   "period": "full",
+   "selections": [
+    {
+     "name": "Over 1.5",
+     "odds": 3.75
+    },
+    {
+     "name": "Under 1.5",
+     "odds": 1.23
+    }
+   ],
+   "status": "open",
+   "match_id": "live-fortuna-stuttgart-20261016"
+  },
+  {
+   "line": 2.5,
+   "market_key": "ou_2_5",
+   "market_label": "Over/Under",
+   "period": "full",
+   "selections": [],
+   "status": "suspended",
+   "status_note": "Under 2.5 locked at 90+3; Over 2.5 quoted 13.00 on a half-locked market - not evaluable",
+   "match_id": "live-fortuna-stuttgart-20261016"
+  },
+  {
+   "line": null,
+   "market_key": "next_goal",
+   "market_label": "2nd Goal",
+   "period": "full",
+   "selections": [],
+   "status": "suspended",
+   "match_id": "live-fortuna-stuttgart-20261016"
+  },
+  {
+   "line": null,
+   "market_key": "handicap_1_0",
+   "market_label": "Handicap 1:0",
+   "period": "full",
+   "selections": [],
+   "status": "suspended",
+   "match_id": "live-fortuna-stuttgart-20261016"
+  },
+  {
+   "line": null,
+   "market_key": "handicap_2_0",
+   "market_label": "Handicap 2:0",
+   "period": "full",
+   "selections": [],
+   "status": "suspended",
+   "match_id": "live-fortuna-stuttgart-20261016"
+  },
+  {
+   "line": 0.5,
+   "market_key": "ah_0.5",
+   "market_label": "Asian Handicap 0.5",
+   "period": "full",
+   "selections": [],
+   "status": "suspended",
+   "match_id": "live-fortuna-stuttgart-20261016"
+  },
+  {
+   "line": 1.5,
+   "market_key": "ah_1.5",
+   "market_label": "Asian Handicap 1.5",
+   "period": "full",
+   "selections": [],
+   "status": "suspended",
+   "match_id": "live-fortuna-stuttgart-20261016"
+  },
+  {
+   "line": null,
+   "market_key": "1x2_2h",
+   "market_label": "2nd Half - 1X2",
+   "period": "2h",
+   "selections": [
+    {
+     "name": "Away",
+     "odds": 1.05
+    },
+    {
+     "name": "Draw",
+     "odds": 8.0
+    },
+    {
+     "name": "Home",
+     "odds": 61.0
+    }
+   ],
+   "status": "open",
+   "match_id": "live-fortuna-stuttgart-20261016"
+  }
+ ],
+ "match_id": "live-fortuna-stuttgart-20261016",
+ "meta": {
+  "account_mode_seen": "REAL (read-only observation; nothing clicked, betslip untouched)",
+  "clock_note": "Page clock read '90:00 +03:42'. Stoppage total unknown.",
+  "fixture": "Fortuna Cologne vs VfB Stuttgart II",
+  "match_id_note": "Atlas observation id (SportyBet sr:match id not captured; never invented).",
+  "observed_at": "2026-10-16T18:42:00+00:00",
+  "observed_at_note": "Approx: page taskbar 11:41-11:42 AM GMT-07:00 during read.",
+  "outcome_note": "Final whistle observed on a second read minutes later (page showed 'Ended 0:1, HT 0:0').",
+  "outcome_observed_at": "2026-10-16T18:45:00+00:00",
+  "source": "sportybet_browser",
+  "source_url": "https://www.sportybet.com/ng/sport/live/"
+ },
+ "outcome": {
+  "away_goals": 1,
+  "home_goals": 0,
+  "settled": {
+   "1x2_2h": "Away",
+   "ou_1_5": "Under 1.5"
+  }
+ },
+ "state": {
+  "away": {
+   "corners": 1,
+   "corners_note": "from snapshot text row; medium confidence",
+   "goals": 1,
+   "name": "VfB Stuttgart II",
+   "possession_pct": 56.0,
+   "red_cards": 0,
+   "yellow_cards": 5,
+   "yellow_cards_note": "snapshot text row showed 5; team header in screenshot read 6 - recorded as observed range 5-6, using 5"
+  },
+  "clock_label": "90:00 +03:42",
+  "clock_minute": 93.7,
+  "competition": "3. Liga | Matchday 10",
+  "half_away_goals": 0,
+  "half_home_goals": 0,
+  "home": {
+   "corners": 3,
+   "corners_note": "from snapshot text row; medium confidence",
+   "goals": 0,
+   "name": "Fortuna Cologne",
+   "possession_pct": 44.0,
+   "red_cards": 1,
+   "yellow_cards": 1
+  },
+  "period": "2h",
+  "remaining_unknown": true
+ }
+}

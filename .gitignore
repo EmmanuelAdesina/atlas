@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Secrets — never commit real credentials (see .env.example)
+.env
+*.pem
+*.key
+
+# Data — raw snapshots and local databases are generated, not versioned
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Test / tool caches
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/

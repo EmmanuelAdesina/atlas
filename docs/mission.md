@@ -15,4 +15,8 @@ Every recommendation must be:
 
 Atlas is a decision intelligence system.
 
-Football betting is only the first application.
+Live single-match sports betting intelligence on SportyBet is the first
+application: one selected live match at a time, current live statistics and
+live odds as primary inputs, mathematical evaluation before any action.
+Execution stays observe-only until explicitly authorized with risk controls
+in place. Polymarket may be added later as a separate venue.

@@ -1,34 +1,31 @@
-from pydantic_settings import BaseSettings
-from pydantic import Field
 from typing import Optional
 
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
     # API Keys
-    football_data_api_key: Optional[str] = Field(None, env="FOOTBALL_DATA_API_KEY")
-    odds_api_key: Optional[str] = Field(None, env="ODDS_API_KEY")
-    
+    football_data_api_key: Optional[str] = None
+    odds_api_key: Optional[str] = None
+
     # Database
-    database_url: str = Field("sqlite:///data/database/atlas.db", env="DATABASE_URL")
-    
+    database_url: str = "sqlite:///data/database/atlas.db"
+
     # Paths
-    raw_data_path: str = Field("data/raw", env="RAW_DATA_PATH")
-    processed_data_path: str = Field("data/processed", env="PROCESSED_DATA_PATH")
-    
+    raw_data_path: str = "data/raw"
+    processed_data_path: str = "data/processed"
+
     # HTTP Client
-    request_timeout: int = Field(30, env="REQUEST_TIMEOUT")
-    max_retries: int = Field(3, env="MAX_RETRIES")
-    retry_backoff: int = Field(1, env="RETRY_BACKOFF")
-    user_agent: str = Field(
-        "Atlas/0.1.0 (Football Data Collector)",
-        env="USER_AGENT"
-    )
-    rate_limit_per_second: int = Field(5, env="RATE_LIMIT_PER_SECOND")
-    
+    request_timeout: int = 30
+    max_retries: int = 3
+    retry_backoff: int = 1
+    user_agent: str = "Atlas/0.1.0 (research data collector)"
+    rate_limit_per_second: int = 5
+
     # Logging
-    log_level: str = Field("INFO", env="LOG_LEVEL")
-    
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    log_level: str = "INFO"
+
 
 settings = Settings()

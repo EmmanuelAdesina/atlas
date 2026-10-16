@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from enum import Enum
 
 class Competition(str, Enum):
@@ -42,7 +42,8 @@ class Match(BaseModel):
     date: datetime
     venue: Optional[str] = None
     
-    @validator('home_goals', 'away_goals')
+    @field_validator('home_goals', 'away_goals')
+    @classmethod
     def validate_goals(cls, v):
         if v is not None and v < 0:
             raise ValueError("Goals cannot be negative")
@@ -57,7 +58,8 @@ class Odds(BaseModel):
     away_odds: float = Field(ge=1.0)
     opening_odds: bool = False
     
-    @validator('home_odds', 'draw_odds', 'away_odds')
+    @field_validator('home_odds', 'draw_odds', 'away_odds')
+    @classmethod
     def validate_odds(cls, v):
         if v < 1.0:
             raise ValueError("Odds must be >= 1.0")

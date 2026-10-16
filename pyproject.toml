@@ -1,0 +1,31 @@
+[project]
+name = "atlas"
+version = "0.1.0"
+description = "Atlas — autonomous decision intelligence system. V1: SportyBet live single-match research pipeline."
+requires-python = ">=3.10"
+# Minimal runtime deps only. pandas / numpy / scikit-learn / xgboost are
+# deliberately NOT hard dependencies: binary wheels are unavailable or
+# unreliable on the primary ARMv7 (Termux) target. Add them per-module with
+# import guards only when a validated need exists.
+dependencies = [
+    "httpx>=0.25.0",
+    "tenacity>=8.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
