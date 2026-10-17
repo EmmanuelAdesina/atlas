@@ -17,6 +17,7 @@ is out of scope for this loop.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Optional
 
 from atlas.live.math_engine import (
@@ -44,25 +45,46 @@ CORRELATED_GROUPS: dict[str, set[str]] = {
 
 
 def selection_correlation_groups(market_key: str, selection: str = "") -> list[str]:
-    """Map both legacy shorthand keys and canonical (market_key, selection) pairs to risk factors."""
-    groups: set[str] = {
-        g for g, keys in CORRELATED_GROUPS.items() if market_key in keys
-    }
+    """Map legacy and canonical market/selection pairs to shared risk factors."""
     mkey = market_key.strip().lower()
     sel = selection.strip().lower()
+    compact_sel = re.sub(r"[^a-z0-9]+", "", sel)
+    groups: set[str] = {
+        group
+        for group, keys in CORRELATED_GROUPS.items()
+        if mkey in {key.lower() for key in keys}
+    }
 
-    # Canonical SportyBet factor mapping
-    if mkey in ("1x2", "1x2_1h", "1x2_2h", "rest_of_match", "rest_of_match_1x2", "dnb", "draw_no_bet"):
-        if sel in ("home", "1"):
-            groups.add("home_goals")
-            groups.add("home_supremacy")
-        elif sel in ("away", "2"):
-            groups.add("away_goals")
-            groups.add("away_supremacy")
-        elif sel in ("draw", "x"):
+    dnb_keys = {"dnb", "draw_no_bet", "1h_dnb", "2h_dnb", "dnb_1h", "dnb_2h"}
+    one_x2_keys = {
+        "1x2", "1x2_1h", "1x2_2h", "rest_of_match", "rest_of_match_1x2",
+        *dnb_keys,
+    }
+    if mkey in one_x2_keys:
+        if compact_sel in {"home", "1"}:
+            groups.update(("home_goals", "home_supremacy"))
+            if mkey in dnb_keys:
+                groups.add("low_tempo_under")
+        elif compact_sel in {"away", "2"}:
+            groups.update(("away_goals", "away_supremacy"))
+            if mkey in dnb_keys:
+                groups.add("low_tempo_under")
+        elif compact_sel in {"draw", "x"}:
             groups.add("low_tempo_under")
 
-    elif mkey.startswith(("ou_", "home_ou_", "away_ou_")):
+    elif mkey in {
+        "double_chance", "dc", "doublechance", "1h_double_chance",
+        "2h_double_chance", "double_chance_1h", "double_chance_2h",
+        "1h_dc", "2h_dc",
+    }:
+        if compact_sel in {"homeordraw", "draworhome", "1x"}:
+            groups.update(("home_goals", "home_supremacy", "low_tempo_under"))
+        elif compact_sel in {"draworaway", "awayordraw", "x2"}:
+            groups.update(("away_goals", "away_supremacy", "low_tempo_under"))
+        elif compact_sel in {"homeoraway", "awayorhome", "12"}:
+            groups.update(("home_supremacy", "away_supremacy"))
+
+    elif mkey.startswith(("ou_", "home_ou_", "away_ou_", "1h_ou_", "2h_ou_")):
         if sel.startswith("over"):
             groups.add("total_goals")
             if mkey.startswith("home_ou_"):
@@ -72,31 +94,25 @@ def selection_correlation_groups(market_key: str, selection: str = "") -> list[s
         elif sel.startswith("under"):
             groups.add("low_tempo_under")
 
-    elif mkey in ("btts", "gg_ng", "1h_btts", "2h_btts"):
-        if sel in ("yes", "gg"):
-            groups.add("total_goals")
-            groups.add("home_goals")
-            groups.add("away_goals")
-        elif sel in ("no", "ng"):
+    elif mkey in ("btts", "gg_ng", "1h_btts", "2h_btts", "btts_1h", "btts_2h"):
+        if compact_sel in {"yes", "gg"}:
+            groups.update(("total_goals", "home_goals", "away_goals"))
+        elif compact_sel in {"no", "ng"}:
             groups.add("low_tempo_under")
 
     elif mkey == "next_goal":
-        if sel in ("home", "1"):
-            groups.add("home_goals")
-            groups.add("total_goals")
-        elif sel in ("away", "2"):
-            groups.add("away_goals")
-            groups.add("total_goals")
-        elif sel in ("none", "no goal"):
+        if compact_sel in {"home", "1"}:
+            groups.update(("home_goals", "total_goals"))
+        elif compact_sel in {"away", "2"}:
+            groups.update(("away_goals", "total_goals"))
+        elif compact_sel in {"none", "nogoal"}:
             groups.add("low_tempo_under")
 
     elif mkey.startswith(("ah_", "asian_handicap_", "handicap_")):
         if sel.startswith("home"):
-            groups.add("home_supremacy")
-            groups.add("home_goals")
+            groups.update(("home_supremacy", "home_goals"))
         elif sel.startswith("away"):
-            groups.add("away_supremacy")
-            groups.add("away_goals")
+            groups.update(("away_supremacy", "away_goals"))
 
     elif "corner" in mkey:
         if "home" in mkey:
@@ -148,28 +164,54 @@ class Opportunity:
     model_name: str = "unspecified"
     p_lower: Optional[float] = None
     p_push: float = 0.0
+    p_half_win: float = 0.0
+    p_half_loss: float = 0.0
+    settlement_scenarios: list[tuple[float, float, float, float]] = field(
+        default_factory=list, repr=False
+    )
     ev: float = field(init=False)
     ev_lower: float = field(init=False)
     breakeven_p: float = field(init=False)
     kelly_fraction: float = field(init=False)
 
     def __post_init__(self) -> None:
+        """`model_p` and `p_lower` are full-win probabilities."""
         self.breakeven_p = breakeven(self.odds)
-        if self.p_push > 0.0:
-            self.ev = expected_value_detailed(
-                self.odds, p_win=self.model_p, p_push=self.p_push
-            )
-        else:
-            self.ev = expected_value(self.model_p, self.odds)
+        self.ev = expected_value_detailed(
+            self.odds,
+            p_win=self.model_p,
+            p_push=self.p_push,
+            p_half_win=self.p_half_win,
+            p_half_loss=self.p_half_loss,
+        )
         p_low = self.p_lower if self.p_lower is not None else self.model_p
-        if self.p_push > 0.0:
-            self.ev_lower = expected_value_detailed(
-                self.odds, p_win=p_low, p_push=self.p_push
-            )
-        else:
-            self.ev_lower = expected_value(p_low, self.odds)
+        scenarios = self.settlement_scenarios or [
+            (p_low, self.p_push, self.p_half_win, self.p_half_loss)
+        ]
+        conservative = min(
+            scenarios,
+            key=lambda item: expected_value_detailed(
+                self.odds,
+                p_win=item[0],
+                p_push=item[1],
+                p_half_win=item[2],
+                p_half_loss=item[3],
+            ),
+        )
+        self.ev_lower = expected_value_detailed(
+            self.odds,
+            p_win=conservative[0],
+            p_push=conservative[1],
+            p_half_win=conservative[2],
+            p_half_loss=conservative[3],
+        )
         self.kelly_fraction = fractional_kelly_stake(
-            p_low, self.odds, p_push=self.p_push, fraction=0.25
+            conservative[0],
+            self.odds,
+            p_push=conservative[1],
+            fraction=0.25,
+            p_half_win=conservative[2],
+            p_half_loss=conservative[3],
         )
 
 

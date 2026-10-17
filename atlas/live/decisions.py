@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 
 from atlas.live.estimate import Estimate
-from atlas.live.loop import expected_value, selection_correlation_groups
+from atlas.live.loop import selection_correlation_groups
 from atlas.live.math_engine import fractional_kelly_stake
 
 BETTABLE_CONFIDENCE = {"medium", "high"}
@@ -56,12 +56,17 @@ def compute_recommended_stake_ngn(
     est: Estimate, odds: float, policy: PolicyConfig, current_match_exposure: float = 0.0
 ) -> float:
     """Compute whole-Naira fractional Kelly stake on conservative p_lower, subject to SportyBet NG caps."""
-    p_cons = est.p_lower if est.p_lower is not None else (est.p or 0.0)
+    settlement = est.conservative_settlement(odds)
+    if settlement is None:
+        return 0.0
+    p_cons, p_push_cons, p_half_win_cons, p_half_loss_cons = settlement
     f_star = fractional_kelly_stake(
         p_win_conservative=p_cons,
         odds=odds,
-        p_push=est.p_push,
+        p_push=p_push_cons,
         fraction=policy.kelly_fraction,
+        p_half_win=p_half_win_cons,
+        p_half_loss=p_half_loss_cons,
     )
     if f_star <= 0.0:
         return 0.0
@@ -85,15 +90,19 @@ class DecisionRecord:
     market_key: str
     selection: str
     odds: float
-    model_p: Optional[float]
+    model_p: Optional[float]  # probability of a full win; settlement splits are separate below
     ev: Optional[float]
     confidence: str
     decision: str  # 'pass' | 'recommend'
     reason: str
-    stake: float = 0.0
+    stake: float = 0.0  # recommendation/executed stake; zero in observe-only mode
+    shadow_stake: float = 0.0  # hypothetical stake used only for shadow risk accounting
     currency: str = "NGN"
     p_lower: Optional[float] = None
     p_upper: Optional[float] = None
+    p_push: float = 0.0
+    p_half_win: float = 0.0
+    p_half_loss: float = 0.0
     ev_lower: Optional[float] = None
     correlation_groups: list[str] = field(default_factory=list)
     decided_at: str = field(
@@ -109,6 +118,9 @@ class DecisionLog:
     _taken: set = field(default_factory=set, repr=False)
     _exposure: dict = field(default_factory=dict, repr=False)
     _group_counts: dict = field(default_factory=dict, repr=False)
+    _shadow_taken: set = field(default_factory=set, repr=False)
+    _shadow_exposure: dict = field(default_factory=dict, repr=False)
+    _shadow_group_counts: dict = field(default_factory=dict, repr=False)
 
     def decide(
         self,
@@ -122,6 +134,11 @@ class DecisionLog:
     ) -> DecisionRecord:
         key = (match_id, market_key, selection)
         groups = selection_correlation_groups(market_key, selection)
+        # Observe-only still runs a shadow portfolio through the exact same
+        # duplicate/exposure/correlation caps. It never records real exposure.
+        taken = self._taken if self.policy.allow_execution else self._shadow_taken
+        exposure_by_match = self._exposure if self.policy.allow_execution else self._shadow_exposure
+        group_counts_by_match = self._group_counts if self.policy.allow_execution else self._shadow_group_counts
 
         if self.policy.kill_switch:
             return self._record(
@@ -182,11 +199,7 @@ class DecisionLog:
                 groups=groups,
             )
 
-        ev = (
-            est.expected_value(odds)
-            if (est.p_push > 0.0 or est.p_half_win > 0.0 or est.p_half_loss > 0.0)
-            else expected_value(est.p, odds)
-        )
+        ev = est.expected_value(odds)
         ev_low = est.conservative_expected_value(odds)
 
         if est.confidence not in BETTABLE_CONFIDENCE:
@@ -232,7 +245,7 @@ class DecisionLog:
                 ev_lower=ev_low,
                 groups=groups,
             )
-        if key in self._taken:
+        if key in taken:
             return self._record(
                 match_id,
                 market_key,
@@ -246,8 +259,8 @@ class DecisionLog:
                 groups=groups,
             )
 
-        exposure = self._exposure.get(match_id, 0.0)
-        bets = sum(1 for k in self._taken if k[0] == match_id)
+        exposure = exposure_by_match.get(match_id, 0.0)
+        bets = sum(1 for k in taken if k[0] == match_id)
         if bets >= self.policy.max_bets_per_match:
             return self._record(
                 match_id,
@@ -263,7 +276,7 @@ class DecisionLog:
             )
 
         if self.policy.enforce_correlation_groups and groups:
-            match_groups = self._group_counts.get(match_id, {})
+            match_groups = group_counts_by_match.get(match_id, {})
             blocked_group = next(
                 (
                     g
@@ -287,7 +300,12 @@ class DecisionLog:
                 )
 
         effective_stake = stake
-        if effective_stake <= 0.0 and self.policy.auto_size_kelly:
+        if effective_stake <= 0.0 and (
+            self.policy.auto_size_kelly or not self.policy.allow_execution
+        ):
+            # In observe-only mode, size a hypothetical portfolio position even
+            # when auto-sizing for execution is disabled, so exposure limits are
+            # exercised without creating real exposure.
             effective_stake = compute_recommended_stake_ngn(
                 est, odds, self.policy, current_match_exposure=exposure
             )
@@ -299,11 +317,39 @@ class DecisionLog:
                     odds,
                     est,
                     "pass",
-                    f"Kelly stake below SportyBet NG min {self.policy.min_stake_ngn:.0f} {self.policy.currency}",
+                    f"Kelly/shadow stake below SportyBet NG min {self.policy.min_stake_ngn:.0f} {self.policy.currency}",
                     ev=ev,
                     ev_lower=ev_low,
                     groups=groups,
                 )
+        elif effective_stake <= 0.0:
+            return self._record(
+                match_id,
+                market_key,
+                selection,
+                odds,
+                est,
+                "pass",
+                "positive stake required before execution recommendation",
+                ev=ev,
+                ev_lower=ev_low,
+                groups=groups,
+            )
+
+        if 0.0 < effective_stake < self.policy.min_stake_ngn:
+            return self._record(
+                match_id,
+                market_key,
+                selection,
+                odds,
+                est,
+                "pass",
+                f"stake below SportyBet NG min {self.policy.min_stake_ngn:.0f} {self.policy.currency}",
+                ev=ev,
+                ev_lower=ev_low,
+                groups=groups,
+                shadow_stake=effective_stake if not self.policy.allow_execution else 0.0,
+            )
 
         if effective_stake > self.policy.max_stake_per_bet:
             return self._record(
@@ -317,6 +363,7 @@ class DecisionLog:
                 ev=ev,
                 ev_lower=ev_low,
                 groups=groups,
+                shadow_stake=effective_stake if not self.policy.allow_execution else 0.0,
             )
         if exposure + effective_stake > self.policy.max_exposure_per_match:
             return self._record(
@@ -330,6 +377,7 @@ class DecisionLog:
                 ev=ev,
                 ev_lower=ev_low,
                 groups=groups,
+                shadow_stake=effective_stake if not self.policy.allow_execution else 0.0,
             )
         if effective_stake * odds > self.policy.max_payout_per_bet:
             return self._record(
@@ -343,8 +391,14 @@ class DecisionLog:
                 ev=ev,
                 ev_lower=ev_low,
                 groups=groups,
+                shadow_stake=effective_stake if not self.policy.allow_execution else 0.0,
             )
         if not self.policy.allow_execution:
+            self._shadow_taken.add(key)
+            self._shadow_exposure[match_id] = exposure + effective_stake
+            match_groups = self._shadow_group_counts.setdefault(match_id, {})
+            for g in groups:
+                match_groups[g] = match_groups.get(g, 0) + 1
             return self._record(
                 match_id,
                 market_key,
@@ -352,10 +406,11 @@ class DecisionLog:
                 odds,
                 est,
                 "pass",
-                f"EV {ev:.3f} passes bar but execution disabled (V1 observe-only)",
+                f"EV {ev:.3f} passes bar but execution disabled (shadow risk limits recorded)",
                 ev=ev,
                 ev_lower=ev_low,
                 groups=groups,
+                shadow_stake=effective_stake,
             )
 
         self._taken.add(key)
@@ -390,6 +445,7 @@ class DecisionLog:
         ev_lower=None,
         stake=0.0,
         groups=None,
+        shadow_stake=0.0,
     ) -> DecisionRecord:
         rec = DecisionRecord(
             match_id=match_id,
@@ -402,9 +458,13 @@ class DecisionLog:
             decision=decision,
             reason=reason,
             stake=stake,
+            shadow_stake=shadow_stake,
             currency=self.policy.currency,
             p_lower=est.p_lower,
             p_upper=est.p_upper,
+            p_push=est.p_push,
+            p_half_win=est.p_half_win,
+            p_half_loss=est.p_half_loss,
             ev_lower=ev_lower,
             correlation_groups=groups or [],
         )

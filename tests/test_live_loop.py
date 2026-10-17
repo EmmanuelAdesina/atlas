@@ -15,9 +15,9 @@ import pytest
 
 from atlas.browser.webbridge import WebBridgeAdapter, WebBridgeError
 from atlas.live.decisions import DecisionLog, PolicyConfig
-from atlas.live.estimate import Estimate, NoMoreGoalsBaseline, check_implications
+from atlas.live.estimate import Estimate, LiveStateSpaceModel, NoMoreGoalsBaseline, check_implications
 from atlas.live.extract import extract_clock_score, extract_markets, iter_texts
-from atlas.live.loop import expected_value
+from atlas.live.loop import LoopConfig, Opportunity, expected_value, rank_and_filter
 from atlas.live.observe import LiveMatchState
 from atlas.mappers.sportybet_mapper import map_sport_markets
 
@@ -201,3 +201,91 @@ def test_webbridge_raises_on_daemon_error():
         200, json={"ok": False, "error": {"code": "extension_error", "message": "nope"}}))
     with pytest.raises(WebBridgeError, match="extension_error"):
         WebBridgeAdapter(session="t", client=client).snapshot()
+
+
+
+def test_confidence_uses_probability_scale_aware_interval():
+    fx = load_fixture()
+    observed_at = datetime.fromisoformat(fx["meta"]["observed_at"])
+    state = make_state(fx, observed_at)
+    estimate = LiveStateSpaceModel(now=observed_at).estimate(state, "1x2_2h", "Home")
+    assert estimate.p is not None and estimate.p < 0.001
+    assert estimate.confidence == "low"
+    assert estimate.diagnostics["logit_uncertainty_width"] > 2.0
+
+
+def test_observe_only_decisions_apply_shadow_correlation_and_exposure_caps(tmp_path):
+    policy = PolicyConfig(
+        min_ev=0.01,
+        max_bets_per_match=2,
+        max_correlated_in_group=1,
+        max_exposure_per_match=250.0,
+        allow_execution=False,
+    )
+    log = DecisionLog(tmp_path / "shadow.jsonl", policy)
+    first = log.decide(
+        "m", "1x2", "Home", 2.0, "open", Estimate(0.80, "high", "model")
+    )
+    assert first.decision == "pass"
+    assert "shadow risk limits recorded" in first.reason
+    assert first.shadow_stake == pytest.approx(250.0)
+    assert log._shadow_exposure["m"] == pytest.approx(250.0)
+
+    correlated = log.decide(
+        "m", "double_chance", "Home or Draw", 1.20, "open",
+        Estimate(0.95, "high", "model"), stake=100.0,
+    )
+    assert correlated.decision == "pass"
+    assert "correlated" in correlated.reason
+    exposure_limited = log.decide(
+        "m", "home_corners_5_5", "Over 5.5", 2.0,
+        "open", Estimate(0.80, "high", "model"), stake=100.0,
+    )
+    assert exposure_limited.decision == "pass"
+    assert "exposure cap" in exposure_limited.reason
+    assert exposure_limited.shadow_stake == pytest.approx(100.0)
+    assert log._taken == set() and log._exposure == {}
+    assert len(log._shadow_taken) == 1
+    assert log._shadow_exposure["m"] == pytest.approx(250.0)
+
+
+def test_opportunity_ranks_quarter_lines_with_detailed_ev():
+    quarter = Opportunity(
+        match_id="m", market_key="ou_2_25", selection="Over 2.25",
+        odds=2.0, model_p=0.35, p_lower=0.30,
+        p_half_win=0.40, p_half_loss=0.10,
+    )
+    # Simple p*odds-1 is -0.30; exact split-settlement EV is +0.35.
+    assert quarter.ev == pytest.approx(0.35)
+    accepted, rejected = rank_and_filter([quarter], LoopConfig(min_ev=0.20))
+    assert accepted == [quarter]
+    assert rejected == []
+
+    conservative = Opportunity(
+        match_id="m", market_key="ah_-0.25", selection="Home (-0.25)",
+        odds=2.0, model_p=0.50, p_lower=0.40,
+        p_half_win=0.10, p_half_loss=0.10,
+        settlement_scenarios=[
+            (0.40, 0.00, 0.30, 0.00),
+            (0.50, 0.00, 0.00, 0.30),
+        ],
+    )
+    assert conservative.ev == pytest.approx(0.20)
+    assert conservative.ev_lower == pytest.approx(0.15)
+    accepted, rejected = rank_and_filter(
+        [conservative], LoopConfig(min_ev=0.10, min_ev_lower=0.18)
+    )
+    assert accepted == []
+    assert "EV_lower" in rejected[0]["reason"]
+
+
+def test_policy_rejects_manual_stake_below_minimum(tmp_path):
+    log = DecisionLog(
+        tmp_path / "minimum.jsonl",
+        PolicyConfig(allow_execution=True, min_ev=0.01, min_stake_ngn=100.0),
+    )
+    rec = log.decide(
+        "m", "1x2", "Home", 2.0, "open", Estimate(0.8, "high", "model"), stake=50.0
+    )
+    assert rec.decision == "pass"
+    assert "below SportyBet NG min" in rec.reason

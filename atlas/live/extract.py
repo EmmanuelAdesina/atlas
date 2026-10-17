@@ -364,8 +364,14 @@ def extract_live_match_state(
     observed_at: Optional[datetime] = None,
     source_url: str = "",
     source: str = "sportybet_browser",
+    prematch_1x2_odds: Optional[dict[str, float]] = None,
+    card_minute: Optional[float] = None,
 ) -> LiveMatchState:
-    """Extract full LiveMatchState (including team names, HT score, cards, corners, shots, possession, subs) from snapshot texts."""
+    """Extract a LiveMatchState from snapshot text.
+
+    Pre-match odds, if available, must be supplied separately; current live
+    prices are never inferred or reused as pre-match priors.
+    """
     observed_at = observed_at or datetime.now(timezone.utc)
     basic = extract_clock_score(texts)
 
@@ -517,6 +523,8 @@ def extract_live_match_state(
         substitutions_count=subs_count,
         remaining_unknown=in_stoppage_unknown,
         account_balance_ngn=balance_ngn,
+        prematch_1x2_odds=prematch_1x2_odds,
+        card_minute=card_minute,
         observed_at=observed_at,
         source=source,
         source_url=source_url,
