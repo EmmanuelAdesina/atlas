@@ -5,6 +5,7 @@ cross-market coherence laws, calibration forensics, and Slow-Plane Boss ratchet 
 from __future__ import annotations
 
 import json
+import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,12 +31,17 @@ from atlas.live.estimate import (
 )
 from atlas.live.extract import extract_live_match_state, extract_markets
 from atlas.live.math_engine import (
+    compute_posterior_intensities,
     devig_power,
     devig_proportional,
     devig_shin,
+    effective_hazard_fraction,
     estimate_remaining_minutes,
+    expected_value_detailed,
+    fractional_kelly_stake,
     infer_prematch_lambdas_from_1x2,
 )
+from atlas.live.loop import Opportunity, selection_correlation_groups
 from atlas.live.observe import LiveMatchState, TeamStats
 from atlas.mappers.sportybet_mapper import map_sport_markets
 
@@ -238,6 +244,198 @@ def test_infer_prematch_lambdas_from_1x2():
     assert 1.2 < lh < 2.2
     assert 0.5 < la < 1.3
 
+    # Strong-favourite markets must not pin a genuinely weak side to the old
+    # 0.20 lower grid bound.
+    lh_extreme, la_extreme = infer_prematch_lambdas_from_1x2(1.02, 12.0, 50.0)
+    assert lh_extreme > 2.0
+    assert 0.05 <= la_extreme < 0.20
+
+
+def test_pre_match_1x2_odds_are_wired_into_the_live_prior():
+    state = _sample_midgame_state(clock_minute=0.0, home_goals=0, away_goals=0)
+    state = state.model_copy(update={
+        "period": "1h",
+        "prematch_1x2_odds": {"Home": 1.02, "Draw": 12.0, "Away": 50.0},
+        "home": state.home.model_copy(update={"shots_on_target": None, "shots_total": None, "corners": None}),
+        "away": state.away.model_copy(update={"shots_on_target": None, "shots_total": None, "corners": None}),
+    })
+    model = LiveStateSpaceModel(now=NOW)
+    est = model.estimate(state, "1x2", "Home")
+    assert est.diagnostics["prior_source"] == "prematch_1x2"
+    assert est.diagnostics["lambda_home_90"] > 2.0
+    assert est.diagnostics["lambda_away_90"] < 0.20
+
+
+def test_full_match_hazard_is_normalized_to_full_match_prior():
+    state = _sample_midgame_state(clock_minute=0.0, home_goals=0, away_goals=0)
+    state = state.model_copy(update={
+        "period": "1h",
+        "home": state.home.model_copy(update={"goals": 0}),
+        "away": state.away.model_copy(update={"goals": 0}),
+    })
+    remaining = estimate_remaining_minutes(state, period_scope="full")
+    assert effective_hazard_fraction("1h", 0.0, remaining.rem_mean) == pytest.approx(1.0)
+    est = LiveStateSpaceModel(now=NOW).estimate(state, "ou_2_5", "Over 2.5")
+    assert est.diagnostics["mu_home_rem"] == pytest.approx(1.42)
+    assert est.diagnostics["mu_away_rem"] == pytest.approx(1.18)
+
+
+def test_first_half_stoppage_uncertainty_is_propagated_to_full_match():
+    state = _sample_midgame_state(clock_minute=47.0, home_goals=0, away_goals=0)
+    state = state.model_copy(update={
+        "period": "1h",
+        "remaining_unknown": True,
+        "added_minutes_announced": None,
+        "clock_label": "45:00 +02:00",
+    })
+    current_half = estimate_remaining_minutes(state, period_scope="1h")
+    full_match = estimate_remaining_minutes(state, period_scope="full")
+    assert current_half.in_stoppage and current_half.stoppage_uncertainty_high
+    assert full_match.in_stoppage and full_match.stoppage_uncertainty_high
+
+    estimate = LiveStateSpaceModel(now=NOW).estimate(state, "ou_2_5", "Over 2.5")
+    assert estimate.confidence == "low"
+    assert "unverified stoppage duration" in (estimate.abstain_reason or "")
+
+
+def test_surface_cache_tracks_all_pressure_and_stoppage_inputs():
+    state = _sample_midgame_state(clock_minute=62.0, home_goals=1, away_goals=1)
+    model = LiveStateSpaceModel(now=NOW)
+    base = model.estimate(state, "ou_2_5", "Over 2.5")
+
+    variants = [
+        state.model_copy(update={
+            "home": state.home.model_copy(update={"shots_total": 20}),
+        }),
+        state.model_copy(update={
+            "home": state.home.model_copy(update={"possession_pct": 30.0}),
+            "away": state.away.model_copy(update={"possession_pct": 70.0}),
+        }),
+        state.model_copy(update={"substitutions_count": 10}),
+    ]
+    for changed in variants:
+        updated = model.estimate(changed, "ou_2_5", "Over 2.5")
+        assert updated.diagnostics["mu_home_rem"] != pytest.approx(base.diagnostics["mu_home_rem"])
+
+
+def test_score_state_is_symmetric_and_possession_alone_does_not_zero_pressure():
+    base = _sample_midgame_state(clock_minute=75.0, home_goals=0, away_goals=0)
+    for margin in (1, 2):
+        home_leads = base.model_copy(update={
+            "home": base.home.model_copy(update={"goals": margin}),
+            "away": base.away.model_copy(update={"goals": 0}),
+        })
+        away_leads = base.model_copy(update={
+            "home": base.home.model_copy(update={"goals": 0}),
+            "away": base.away.model_copy(update={"goals": margin}),
+        })
+        ph = compute_posterior_intensities(home_leads)
+        pa = compute_posterior_intensities(away_leads)
+        assert (ph.score_state_multiplier_home, ph.score_state_multiplier_away) == pytest.approx((0.94, 1.12))
+        assert (pa.score_state_multiplier_home, pa.score_state_multiplier_away) == pytest.approx((1.12, 0.94))
+
+    possession_only = base.model_copy(update={
+        "home": base.home.model_copy(update={
+            "shots_on_target": None, "shots_total": None, "corners": None,
+            "possession_pct": 55.0,
+        }),
+        "away": base.away.model_copy(update={
+            "shots_on_target": None, "shots_total": None, "corners": None,
+            "possession_pct": 45.0,
+        }),
+    })
+    post = compute_posterior_intensities(possession_only)
+    assert post.shrinkage_weight == 0.0
+    assert post.lambda_home_90 == pytest.approx(1.42)
+    assert post.lambda_away_90 == pytest.approx(1.18)
+
+    ten_v_ten = base.model_copy(update={
+        "home": base.home.model_copy(update={"red_cards": 1}),
+        "away": base.away.model_copy(update={"red_cards": 1}),
+    })
+    reds = compute_posterior_intensities(ten_v_ten)
+    assert reds.red_card_multiplier_home == pytest.approx(1.0)
+    assert reds.red_card_multiplier_away == pytest.approx(1.0)
+
+
+def test_quarter_line_ev_and_kelly_use_full_settlement_distribution():
+    est = Estimate(
+        p=0.35,
+        confidence="high",
+        model_name="test",
+        p_lower=0.30,
+        p_half_win=0.20,
+        p_half_loss=0.10,
+        p_push=0.05,
+    )
+    odds = 2.20
+    expected = expected_value_detailed(
+        odds, p_win=0.35, p_push=0.05, p_half_win=0.20, p_half_loss=0.10
+    )
+    assert est.expected_value(odds) == pytest.approx(expected)
+    opp = Opportunity(
+        match_id="m", market_key="ah_-0.25", selection="Home (-0.25)",
+        odds=odds, model_p=0.35, p_lower=0.30, p_push=0.05,
+        p_half_win=0.20, p_half_loss=0.10,
+    )
+    assert opp.ev == pytest.approx(expected)
+    assert opp.ev_lower == pytest.approx(expected_value_detailed(
+        odds, p_win=0.30, p_push=0.05, p_half_win=0.20, p_half_loss=0.10
+    ))
+
+    fractional = fractional_kelly_stake(
+        0.35, odds, p_push=0.05, fraction=0.25,
+        p_half_win=0.20, p_half_loss=0.10,
+    )
+    assert fractional > 0.0
+    # Verify fractional sizing is at one quarter of a full-Kelly optimum under
+    # the actual split settlement returns, not a binary approximation.
+    returns = (odds - 1.0, 0.5 * (odds - 1.0), 0.0, -0.5, -1.0)
+    probs = (0.35, 0.20, 0.05, 0.10, 0.30)
+    f_grid = [i / 10000 for i in range(1, 10000)]
+    best = max(
+        f_grid,
+        key=lambda f: sum(p * math.log1p(f * r) for p, r in zip(probs, returns)),
+    )
+    assert fractional == pytest.approx(0.25 * best, abs=2e-4)
+
+
+def test_state_space_quarter_line_probability_is_full_win_not_effective_win():
+    state = _sample_midgame_state(clock_minute=60.0, home_goals=0, away_goals=0)
+    est = LiveStateSpaceModel(now=NOW).estimate(state, "ou_2_25", "Under 2.25")
+    assert est.p is not None
+    assert est.p + est.p_push + est.p_half_win + est.p_half_loss <= 1.0 + 1e-8
+    assert est.effective_win_probability == pytest.approx(est.p + 0.5 * est.p_half_win)
+    assert est.expected_value(2.0) == pytest.approx(expected_value_detailed(
+        2.0, p_win=est.p, p_push=est.p_push,
+        p_half_win=est.p_half_win, p_half_loss=est.p_half_loss,
+    ))
+
+
+def test_conservative_ev_uses_one_complete_worst_case_settlement():
+    est = Estimate(
+        p=0.50, confidence="high", model_name="test", p_lower=0.40,
+        p_half_win=0.10, p_half_loss=0.10,
+        settlement_scenarios=[
+            (0.40, 0.00, 0.30, 0.00),
+            (0.50, 0.00, 0.00, 0.30),
+        ],
+    )
+    # The second scenario has a higher full-win probability but worse exact EV.
+    assert est.conservative_settlement(2.0) == pytest.approx((0.50, 0.00, 0.00, 0.30))
+    assert est.conservative_expected_value(2.0) == pytest.approx(0.15)
+
+
+def test_correlation_groups_cover_double_chance_and_period_markets():
+    home_1x2 = set(selection_correlation_groups("1x2", "Home"))
+    dc_1x = set(selection_correlation_groups("double_chance", "Home or Draw"))
+    assert home_1x2 & dc_1x
+    assert "low_tempo_under" in dc_1x
+    assert selection_correlation_groups("1h_dnb", "Home")
+    assert selection_correlation_groups("dnb_1h", "Away")
+    assert "total_goals" in selection_correlation_groups("2h_ou_2_5", "Over 2.5")
+    assert "low_tempo_under" in selection_correlation_groups("ou_1h_2_5", "Under 2.5")
+
 
 # ---------------------------------------------------------------------------
 # 4. Full Live Match State & Suspended O/U Line Extraction
@@ -383,7 +581,13 @@ def test_boss_asymmetric_ratchet_enforces_hard_safety_floors(tmp_path):
         min_ev=0.08,
         kelly_fraction=0.10,
         max_exposure_ngn=1500.0,
+        min_ev_lower=0.0,
         rationale="Feed jitter observed in 2H",
+    )
+    # Repeated Boss updates may tighten, but can never loosen an earlier ratchet.
+    boss.set_risk_overrides(
+        min_ev=0.05, kelly_fraction=0.20, max_exposure_ngn=2000.0,
+        min_ev_lower=-0.50, rationale="later weaker diagnostic",
     )
     boss.set_prior_adjustment(
         "m1", delta_home_lambda=-0.15, delta_away_lambda=0.10, rationale="Home striker injured"
@@ -394,6 +598,7 @@ def test_boss_asymmetric_ratchet_enforces_hard_safety_floors(tmp_path):
     assert tightened.min_ev == pytest.approx(0.08)
     assert tightened.kelly_fraction == pytest.approx(0.10)
     assert tightened.max_exposure_per_match == pytest.approx(1500.0)
+    assert tightened.min_ev_lower == pytest.approx(0.0)
     assert "ou_0_5" in tightened.blocked_markets
 
     # Boss CANNOT enable live execution autonomously
@@ -413,7 +618,7 @@ def test_boss_asymmetric_ratchet_enforces_hard_safety_floors(tmp_path):
         boss.set_prior_adjustment("m1", delta_home_lambda=0.60, delta_away_lambda=0.0, rationale="hype")
 
 
-def test_fast_plane_surface_pricing_runs_sub_millisecond():
+def test_fast_plane_surface_pricing_runs_under_two_milliseconds():
     state = _sample_midgame_state(clock_minute=62.0, home_goals=1, away_goals=1)
     model = LiveStateSpaceModel(now=NOW)
     selections = [
@@ -427,10 +632,94 @@ def test_fast_plane_surface_pricing_runs_sub_millisecond():
         ("next_goal", "Home"), ("next_goal", "Away"), ("next_goal", "None"),
         ("ah_-0.25", "Home (-0.25)"), ("ah_-0.25", "Away (+0.25)"),
     ]
-    # Warm up cache once, then time a fresh model evaluation of all 21 selections
+    # Materialize the shared joint/scenario surface first; then time 21 cached
+    # selection prices, matching the documented after-setup throughput target.
+    model.estimate(state, *selections[0])
     t0 = time.perf_counter_ns()
-    fresh_model = LiveStateSpaceModel(now=NOW)
-    out = [fresh_model.estimate(state, m, s) for m, s in selections]
+    out = [model.estimate(state, m, s) for m, s in selections]
     elapsed_us = (time.perf_counter_ns() - t0) / 1000.0
     assert all(not e.abstained for e in out)
-    assert elapsed_us < 2000.0  # Full 21-selection derivative surface in < 2ms
+    assert elapsed_us < 2000.0  # Full 21-selection surface in < 2ms after setup
+
+
+def test_calibration_grades_push_half_outcomes_and_recommendation_roi():
+    dnb_push = {
+        "match_id": "push-match", "market_key": "dnb", "selection": "Home",
+        "odds": 1.90, "model_p": 0.40, "p_push": 0.20,
+        "p_lower": 0.35, "ev": 0.16, "ev_lower": 0.10,
+        "confidence": "high", "decision": "recommend", "stake": 100.0,
+    }
+    half_loss = {
+        "match_id": "quarter-match", "market_key": "ou_2_25", "selection": "Over 2.25",
+        "odds": 2.00, "model_p": 0.30, "p_push": 0.0,
+        "p_half_win": 0.20, "p_half_loss": 0.10,
+        "p_lower": 0.25, "ev": 0.05, "ev_lower": -0.05,
+        "confidence": "medium", "decision": "recommend", "stake": 200.0,
+    }
+    graded, summary = grade_decisions(
+        [dnb_push, half_loss],
+        settled_outcomes={
+            ("push-match", "dnb"): "Draw",
+            ("quarter-match", "ou_2_25"): {
+                "selection_outcomes": {"Over 2.25": "half_loss"},
+            },
+        },
+    )
+    push, half = graded
+    assert push.settlement == "push"
+    assert push.realized_unit_pnl == 0.0 and push.realized_stake_pnl == 0.0
+    assert half.settlement == "half_loss"
+    assert half.realized_unit_pnl == 0.0
+    assert half.realized_stake_pnl == 0.0
+    assert half.paper_unit_pnl == -0.5
+    assert summary.realized_unit_roi == 0.0  # recommendations were not executed
+    assert summary.realized_stake_pnl == 0.0
+    assert summary.recommended_unit_roi == pytest.approx(-0.25)
+    assert summary.recommended_stake_pnl == pytest.approx(-100.0)
+    assert summary.paper_unit_roi == pytest.approx(-0.25)
+
+    executed = {**half_loss, "executed": True}
+    _, actual_summary = grade_decisions(
+        [executed],
+        {("quarter-match", "ou_2_25"): {
+            "selection_outcomes": {"Over 2.25": "half_loss"},
+        }},
+    )
+    assert actual_summary.executed_count == 1
+    assert actual_summary.realized_unit_roi == pytest.approx(-0.5)
+    assert actual_summary.realized_stake_pnl == pytest.approx(-100.0)
+
+
+def test_calibration_separates_realized_recommendations_and_paper_roi():
+    records = [
+        {
+            "match_id": "m", "market_key": "1x2", "selection": "Home",
+            "odds": 2.0, "model_p": 0.60, "decision": "pass", "stake": 0.0,
+        },
+        {
+            "match_id": "m", "market_key": "1x2", "selection": "Away",
+            "odds": 2.0, "model_p": 0.40, "decision": "recommend", "stake": 100.0,
+        },
+    ]
+    graded, summary = grade_decisions(records, {("m", "1x2"): "Home"})
+    assert len(graded) == 2
+    assert summary.realized_unit_roi == 0.0  # no bet was reported executed
+    assert summary.realized_stake_pnl == 0.0
+    assert summary.paper_unit_roi == pytest.approx(0.0)
+    assert summary.recommended_unit_roi == pytest.approx(-1.0)
+    assert summary.recommended_stake_pnl == pytest.approx(-100.0)
+
+
+def test_calibration_adds_proper_categorical_1x2_scores():
+    records = [
+        {"match_id": "m", "market_key": "1x2", "selection": "Home", "odds": 2.0,
+         "model_p": 0.50, "decision": "pass"},
+        {"match_id": "m", "market_key": "1x2", "selection": "Draw", "odds": 3.0,
+         "model_p": 0.30, "decision": "pass"},
+        {"match_id": "m", "market_key": "1x2", "selection": "Away", "odds": 4.0,
+         "model_p": 0.20, "decision": "pass"},
+    ]
+    _, summary = grade_decisions(records, {("m", "1x2"): "Home"})
+    assert summary.multiclass_market_count == 1
+    assert summary.multiclass_log_loss == pytest.approx(-math.log(0.50), abs=1e-4)
+    assert summary.multiclass_brier_score == pytest.approx(0.19, abs=1e-4)

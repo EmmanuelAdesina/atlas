@@ -13,8 +13,8 @@ Models provided:
   2. `LiveStateSpaceModel` — coherent time-inhomogeneous Bivariate Poisson /
      Dixon-Coles state-space surface model with piecewise clock hazard,
      Bayesian live-statistics shrinkage, Markov red-card & score-state
-     multipliers, and 7-point sigma uncertainty propagation across 14+
-     SportyBet market families.
+     multipliers, and a scale-aware multi-parameter scenario envelope across
+     14+ SportyBet market families.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from atlas.live.math_engine import (
     effective_hazard_fraction,
     estimate_remaining_minutes,
     expected_value_detailed,
+    infer_prematch_lambdas_from_1x2,
     price_from_joint_matrix,
 )
 from atlas.live.observe import LiveMatchState
@@ -190,8 +191,19 @@ def check_implications(
 Confidence = str  # 'high' | 'medium' | 'low'
 
 
+def _logit(probability: float, eps: float = 1e-6) -> float:
+    p = min(1.0 - eps, max(eps, probability))
+    return math.log(p) - math.log1p(-p)
+
+
 @dataclass
 class Estimate:
+    """One selection's settlement probabilities and uncertainty envelope.
+
+    `p` is the probability of a full win (not the quarter-line effective-win
+    equivalent); half wins/losses and pushes are carried separately.
+    """
+
     p: Optional[float]
     confidence: Confidence
     model_name: str
@@ -203,10 +215,20 @@ class Estimate:
     p_half_win: float = 0.0
     p_half_loss: float = 0.0
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    settlement_scenarios: list[tuple[float, float, float, float]] = field(
+        default_factory=list, repr=False
+    )
 
     @property
     def abstained(self) -> bool:
         return self.p is None
+
+    @property
+    def effective_win_probability(self) -> Optional[float]:
+        """Display-equivalent win probability including half-win outcomes."""
+        if self.p is None:
+            return None
+        return self.p + 0.5 * self.p_half_win
 
     def expected_value(self, odds: float) -> Optional[float]:
         if self.p is None:
@@ -219,16 +241,46 @@ class Estimate:
             p_half_loss=self.p_half_loss,
         )
 
+    def conservative_settlement(
+        self, odds: float
+    ) -> Optional[tuple[float, float, float, float]]:
+        """Return the modeled settlement vector with the lowest EV at `odds`.
+
+        Each vector is (full-win, push, half-win, half-loss). Using a complete
+        scenario avoids mixing a lower full-win probability with nominal split
+        outcome probabilities when sizing bets.
+        """
+        if self.p is None:
+            return None
+        scenarios = self.settlement_scenarios or [
+            (
+                self.p_lower if self.p_lower is not None else self.p,
+                self.p_push,
+                self.p_half_win,
+                self.p_half_loss,
+            )
+        ]
+        return min(
+            scenarios,
+            key=lambda item: expected_value_detailed(
+                odds,
+                p_win=item[0],
+                p_push=item[1],
+                p_half_win=item[2],
+                p_half_loss=item[3],
+            ),
+        )
+
     def conservative_expected_value(self, odds: float) -> Optional[float]:
-        p_low = self.p_lower if self.p_lower is not None else self.p
-        if p_low is None:
+        scenario = self.conservative_settlement(odds)
+        if scenario is None:
             return None
         return expected_value_detailed(
             odds,
-            p_win=p_low,
-            p_push=self.p_push,
-            p_half_win=self.p_half_win,
-            p_half_loss=self.p_half_loss,
+            p_win=scenario[0],
+            p_push=scenario[1],
+            p_half_win=scenario[2],
+            p_half_loss=scenario[3],
         )
 
 
@@ -357,7 +409,7 @@ class LiveStateSpaceModel:
       - Smooth survival stoppage-time estimation,
       - Empirical Bayes live-stat shrinkage (shots on target, attempts, corners, possession),
       - Markov red-card manpower & score-state hazard multipliers,
-      - 7-point sigma uncertainty propagation producing [p_lower, p, p_upper].
+      - A parameter-perturbation envelope producing [p_lower, p, p_upper].
     """
 
     model_name: str = "live_state_space_bivariate_dc_v2"
@@ -368,12 +420,41 @@ class LiveStateSpaceModel:
     dixon_coles_rho: float = -0.06
     shared_tempo_frac: float = 0.05
     intensity_rel_sigma: float = 0.16
+    dixon_coles_rho_sigma: float = 0.02
+    shared_tempo_abs_sigma: float = 0.03
     max_evidence_age_s: float = 60.0
     now: Optional[datetime] = None
     _surface_cache: dict[tuple, Any] = field(default_factory=dict, repr=False)
+    _prematch_prior_cache: dict[tuple, tuple[float, float]] = field(default_factory=dict, repr=False)
+
+    def _resolved_priors(self, state: LiveMatchState) -> tuple[float, float]:
+        odds = state.prematch_1x2_odds
+        if odds is None:
+            return self.prior_home_lambda, self.prior_away_lambda
+        key = (
+            float(odds["Home"]), float(odds["Draw"]), float(odds["Away"]),
+            self.dixon_coles_rho, self.shared_tempo_frac,
+        )
+        cached = self._prematch_prior_cache.get(key)
+        if cached is not None:
+            return cached
+        priors = infer_prematch_lambdas_from_1x2(
+            key[0], key[1], key[2],
+            rho=self.dixon_coles_rho,
+            shared_tempo_frac=self.shared_tempo_frac,
+        )
+        self._prematch_prior_cache[key] = priors
+        if len(self._prematch_prior_cache) > 64:
+            self._prematch_prior_cache.pop(next(iter(self._prematch_prior_cache)))
+        return priors
+
+    def prepare_priors(self, state: LiveMatchState) -> tuple[float, float]:
+        """Resolve/cache any pre-match 1X2 inversion before the live hot path."""
+        return self._resolved_priors(state)
 
     def _get_surface(self, state: LiveMatchState, period_scope: str) -> tuple:
         eff_scope = "2h" if state.period == "2h" else period_scope
+        prior_home, prior_away = self._resolved_priors(state)
         cache_key = (
             state.match_id,
             state.period,
@@ -386,15 +467,26 @@ class LiveStateSpaceModel:
             state.away_reds,
             state.home.shots_on_target,
             state.away.shots_on_target,
+            state.home.shots_total,
+            state.away.shots_total,
             state.home.corners,
             state.away.corners,
+            state.home.possession_pct,
+            state.away.possession_pct,
+            state.substitutions_count,
             state.remaining_unknown,
             state.added_minutes_announced,
+            tuple(sorted(state.prematch_1x2_odds.items())) if state.prematch_1x2_odds else None,
             eff_scope,
-            self.prior_home_lambda,
-            self.prior_away_lambda,
+            prior_home,
+            prior_away,
             self.prior_adj_home,
             self.prior_adj_away,
+            self.dixon_coles_rho,
+            self.shared_tempo_frac,
+            self.intensity_rel_sigma,
+            self.dixon_coles_rho_sigma,
+            self.shared_tempo_abs_sigma,
         )
         cached = self._surface_cache.get(cache_key)
         if cached is not None:
@@ -404,8 +496,8 @@ class LiveStateSpaceModel:
         stoppage = estimate_remaining_minutes(state, period_scope=eff_scope)
         post = compute_posterior_intensities(
             state,
-            prior_home_lambda=self.prior_home_lambda,
-            prior_away_lambda=self.prior_away_lambda,
+            prior_home_lambda=prior_home,
+            prior_away_lambda=prior_away,
             prior_adj_home=self.prior_adj_home,
             prior_adj_away=self.prior_adj_away,
         )
@@ -433,21 +525,36 @@ class LiveStateSpaceModel:
         )
         marg_nom = compute_matrix_marginals(mat_nom)
         rel_s = self.intensity_rel_sigma
+        rho_low = max(-0.30, min(0.30, self.dixon_coles_rho - self.dixon_coles_rho_sigma))
+        rho_high = max(-0.30, min(0.30, self.dixon_coles_rho + self.dixon_coles_rho_sigma))
+        shared_low = max(0.0, min(0.25, self.shared_tempo_frac - self.shared_tempo_abs_sigma))
+        shared_high = max(0.0, min(0.25, self.shared_tempo_frac + self.shared_tempo_abs_sigma))
+        # Keep a 7-surface hot path (nominal + six perturbations), while
+        # pairing dependence endpoints with intensity/stoppage perturbations.
+        # Thus rho/shared-tempo uncertainty is represented without multiplying
+        # the number of full matrix repricings per selection.
         scenarios = [
-            (post.lambda_home_90 * haz_lo, post.lambda_away_90 * haz_lo),
-            (post.lambda_home_90 * haz_hi, post.lambda_away_90 * haz_hi),
-            (mu_h * (1.0 + rel_s), mu_a * (1.0 + rel_s)),
-            (mu_h * (1.0 - rel_s), mu_a * (1.0 - rel_s)),
-            (mu_h * (1.0 + rel_s), mu_a * (1.0 - rel_s)),
-            (mu_h * (1.0 - rel_s), mu_a * (1.0 + rel_s)),
+            (post.lambda_home_90 * haz_lo, post.lambda_away_90 * haz_lo,
+             rho_low, shared_low),
+            (post.lambda_home_90 * haz_hi, post.lambda_away_90 * haz_hi,
+             rho_high, shared_high),
+            (mu_h * (1.0 + rel_s), mu_a * (1.0 + rel_s),
+             rho_low, shared_high),
+            (mu_h * (1.0 - rel_s), mu_a * (1.0 - rel_s),
+             rho_high, shared_low),
+            (mu_h * (1.0 + rel_s), mu_a * (1.0 - rel_s),
+             rho_low, shared_low),
+            (mu_h * (1.0 - rel_s), mu_a * (1.0 + rel_s),
+             rho_high, shared_high),
         ]
+
         scenario_mats = []
-        for s_mu_h, s_mu_a in scenarios:
+        for s_mu_h, s_mu_a, s_rho, s_shared in scenarios:
             s_mat = build_remaining_score_matrix(
                 s_mu_h,
                 s_mu_a,
-                rho=self.dixon_coles_rho,
-                shared_tempo_frac=self.shared_tempo_frac,
+                rho=s_rho,
+                shared_tempo_frac=s_shared,
                 max_goals=max_g,
             )
             scenario_mats.append(
@@ -455,6 +562,10 @@ class LiveStateSpaceModel:
             )
         bundle = (stoppage, post, mu_h, mu_a, mat_nom, marg_nom, scenario_mats)
         self._surface_cache[cache_key] = bundle
+        # A long-running live loop sees a new snapshot every refresh. Retain a
+        # small working set for repeated market pricing without unbounded growth.
+        if len(self._surface_cache) > 64:
+            self._surface_cache.pop(next(iter(self._surface_cache)))
         return bundle
 
     def estimate(
@@ -503,20 +614,29 @@ class LiveStateSpaceModel:
                 abstain_reason=f"market {market_key}/{selection} outside supported state-space families or missing period state",
             )
 
-        win_samples = [nom_out.effective_win_prob]
+        win_samples = [nom_out.p_win]
+        settlement_samples = [
+            (nom_out.p_win, nom_out.p_push, nom_out.p_half_win, nom_out.p_half_loss)
+        ]
         for s_mu_h, s_mu_a, s_mat, s_marg in scenario_mats:
             s_out = price_from_joint_matrix(
                 s_mat, state, market_key, selection, s_mu_h, s_mu_a, marginals=s_marg
             )
             if s_out is not None:
-                win_samples.append(s_out.effective_win_prob)
+                win_samples.append(s_out.p_win)
+                settlement_samples.append(
+                    (s_out.p_win, s_out.p_push, s_out.p_half_win, s_out.p_half_loss)
+                )
 
-        p_mean = min(1.0, max(0.0, nom_out.effective_win_prob))
+        p_mean = min(1.0, max(0.0, nom_out.p_win))
         p_lower = min(1.0, max(0.0, min(win_samples)))
         p_upper = min(1.0, max(0.0, max(win_samples)))
         width = p_upper - p_lower
+        logit_width = _logit(p_upper) - _logit(p_lower)
 
-        # Determine confidence grade & transparent diagnostics
+        # Determine confidence grade & transparent diagnostics. The 7+ point
+        # perturbation envelope has no nominal coverage level; logit width is a
+        # scale-aware heuristic, especially near probabilities 0 and 1.
         reasons: list[str] = []
         if stoppage.stoppage_uncertainty_high and width > 0.005:
             reasons.append(
@@ -524,13 +644,15 @@ class LiveStateSpaceModel:
             )
         if post.shrinkage_weight == 0.0:
             reasons.append("no live shot/corner stats observed (prior-only intensity)")
-        if width > 0.16:
-            reasons.append(f"wide uncertainty interval ({width:.3f})")
+        if width > 0.16 or logit_width > 2.0:
+            reasons.append(
+                f"wide uncertainty envelope (absolute={width:.3f}, logit={logit_width:.3f})"
+            )
 
         if reasons:
             confidence: Confidence = "low"
             abstain_note: Optional[str] = "low confidence: " + "; ".join(reasons)
-        elif width <= 0.07 and post.shrinkage_weight >= 0.25:
+        elif width <= 0.07 and logit_width <= 0.55 and post.shrinkage_weight >= 0.25:
             confidence = "high"
             abstain_note = None
         else:
@@ -547,6 +669,9 @@ class LiveStateSpaceModel:
             "red_card_mult": [round(post.red_card_multiplier_home, 3), round(post.red_card_multiplier_away, 3)],
             "shrinkage_weight": round(post.shrinkage_weight, 3),
             "uncertainty_width": round(width, 4),
+            "logit_uncertainty_width": round(logit_width, 4),
+            "effective_win_probability": round(nom_out.effective_win_prob, 4),
+            "prior_source": "prematch_1x2" if state.prematch_1x2_odds else "default",
         }
 
         return Estimate(
@@ -560,5 +685,6 @@ class LiveStateSpaceModel:
             p_push=nom_out.p_push,
             p_half_win=nom_out.p_half_win,
             p_half_loss=nom_out.p_half_loss,
+            settlement_scenarios=settlement_samples,
             diagnostics=diagnostics,
         )

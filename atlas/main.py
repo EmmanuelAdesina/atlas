@@ -6,7 +6,7 @@ Commands:
              (including Proportional & Shin de-vigged fair probs).
 
   live-demo  Replay a recorded live observation (fixture) through the full
-             sub-millisecond Fast-Plane loop:
+             low-millisecond Fast-Plane loop:
              normalize -> state-space / baseline estimate -> Shin de-vig ->
              implication check -> risk-gated decision -> calibration & Boss diagnostics.
 
@@ -110,6 +110,7 @@ def _build_state_from_fixture(fixture: dict, observed_at: datetime) -> LiveMatch
         substitutions_count=st.get("substitutions_count"),
         added_minutes_announced=st.get("added_minutes_announced"),
         remaining_unknown=st.get("remaining_unknown", False),
+        prematch_1x2_odds=st.get("prematch_1x2_odds"),
         observed_at=observed_at,
         source=meta.get("source", ""),
         source_url=meta.get("source_url", ""),
@@ -117,7 +118,7 @@ def _build_state_from_fixture(fixture: dict, observed_at: datetime) -> LiveMatch
 
 
 def cmd_live_demo(args: argparse.Namespace) -> int:
-    """Replay a recorded fixture through the sub-millisecond Fast-Plane intelligence loop."""
+    """Replay a recorded fixture through the low-millisecond Fast-Plane loop."""
     try:
         fixture = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -157,6 +158,8 @@ def cmd_live_demo(args: argparse.Namespace) -> int:
             prior_adj_home=adj.delta_home_lambda if adj else 0.0,
             prior_adj_away=adj.delta_away_lambda if adj else 0.0,
         )
+    if isinstance(model, LiveStateSpaceModel):
+        model.prepare_priors(state)
 
     log = DecisionLog(Path(args.log), policy)
     fair: dict[tuple[str, str], float] = {}
@@ -196,8 +199,9 @@ def cmd_live_demo(args: argparse.Namespace) -> int:
         "market",
         "selection",
         "odds",
-        "model_p",
-        "[p_low..p_high]",
+        "p_full_win",
+        "p_effective",
+        "[p_full_low..high]",
         "conf",
         "EV",
         "EV_low",
@@ -215,6 +219,8 @@ def cmd_live_demo(args: argparse.Namespace) -> int:
             s.name,
             f"{s.odds:.2f}",
             f"{est.p:.3f}" if est.p is not None else "-",
+            f"{est.effective_win_probability:.3f}"
+            if est.effective_win_probability is not None else "-",
             bounds_str,
             est.confidence,
             f"{ev:+.3f}" if ev is not None else "-",
@@ -282,6 +288,7 @@ def cmd_boss(args: argparse.Namespace) -> int:
     open_markets = [r for r in records if r.status == "open"]
     state = _build_state_from_fixture(fixture, observed_at)
     model = LiveStateSpaceModel(now=observed_at)
+    model.prepare_priors(state)
     log = DecisionLog(Path(args.log), PolicyConfig())
 
     t0 = time.perf_counter_ns()

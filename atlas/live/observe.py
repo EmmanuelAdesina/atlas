@@ -7,10 +7,11 @@ not a guessed probability (directive sections 2 and 6).
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TeamStats(BaseModel):
@@ -50,9 +51,37 @@ class LiveMatchState(BaseModel):
         default=False, description="True when stoppage length / whistle timing is unknown"
     )
     account_balance_ngn: Optional[float] = None
+    prematch_1x2_odds: Optional[dict[str, float]] = Field(
+        default=None,
+        description=(
+            "Optional observed pre-match decimal odds {Home, Draw, Away}; "
+            "never populate this with current live prices"
+        ),
+    )
     observed_at: datetime = Field(description="When Atlas observed this (UTC)")
     source: str = Field(description="e.g. 'sportybet_browser'")
     source_url: str = ""
+
+    @field_validator("prematch_1x2_odds")
+    @classmethod
+    def validate_prematch_1x2_odds(
+        cls, value: Optional[dict[str, float]]
+    ) -> Optional[dict[str, float]]:
+        if value is None:
+            return None
+        aliases = {"home": "Home", "1": "Home", "draw": "Draw", "x": "Draw", "away": "Away", "2": "Away"}
+        normalized: dict[str, float] = {}
+        for key, raw_odds in value.items():
+            canonical = aliases.get(str(key).strip().lower())
+            if canonical is None:
+                raise ValueError(f"unknown pre-match 1X2 outcome key {key!r}")
+            odds = float(raw_odds)
+            if not math.isfinite(odds) or odds <= 1.0:
+                raise ValueError("pre-match 1X2 decimal odds must be finite and greater than 1.0")
+            normalized[canonical] = odds
+        if set(normalized) != {"Home", "Draw", "Away"}:
+            raise ValueError("pre-match 1X2 odds must include Home, Draw, and Away")
+        return normalized
 
     @property
     def score_total(self) -> Optional[int]:
@@ -91,4 +120,5 @@ class LiveMatchState(BaseModel):
             "away_reds": self.away_reds,
             "observed_at": self.observed_at.isoformat(),
             "source": self.source,
+            "prematch_1x2_odds": self.prematch_1x2_odds,
         }
