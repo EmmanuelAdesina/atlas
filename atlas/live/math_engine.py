@@ -364,6 +364,36 @@ def infer_prematch_lambdas_from_1x2(
     return best_lh, best_la
 
 
+def estimate_xg_from_stats(stats: dict) -> Optional[dict]:
+    """Estimate xG (expected goals) for home and away from live match stats.
+
+    Returns None if insufficient data (no shots or corners for either side).
+    """
+    sot_h = stats.get("shots_on_target_home")
+    sot_a = stats.get("shots_on_target_away")
+    st_h = stats.get("shots_total_home")
+    st_a = stats.get("shots_total_away")
+    cor_h = stats.get("corners_home")
+    cor_a = stats.get("corners_away")
+
+    has_h = sot_h is not None or st_h is not None or cor_h is not None
+    has_a = sot_a is not None or st_a is not None or cor_a is not None
+    if not has_h or not has_a:
+        return None
+
+    sot_h = float(sot_h or 0)
+    sot_a = float(sot_a or 0)
+    st_h = float(st_h or sot_h)
+    st_a = float(st_a or sot_a)
+    cor_h = float(cor_h or 0)
+    cor_a = float(cor_a or 0)
+
+    home_xg = sot_h * 0.30 + max(0.0, st_h - sot_h) * 0.05 + cor_h * 0.02
+    away_xg = sot_a * 0.30 + max(0.0, st_a - sot_a) * 0.05 + cor_a * 0.02
+
+    return {"home_xg": home_xg, "away_xg": away_xg}
+
+
 def compute_posterior_intensities(
     state: LiveMatchState,
     prior_home_lambda: float = 1.42,
@@ -371,11 +401,20 @@ def compute_posterior_intensities(
     prior_adj_home: float = 0.0,
     prior_adj_away: float = 0.0,
     shrinkage_tau_minutes: float = 65.0,
+    xg_estimate: Optional[dict] = None,
 ) -> PosteriorIntensities:
     """Combine baseline priors with live match statistics, red cards, and score state."""
     # Clamp bounded prior adjustments to [-0.30, +0.30]
     base_h = max(0.25, prior_home_lambda + max(-0.30, min(0.30, prior_adj_home)))
     base_a = max(0.20, prior_away_lambda + max(-0.30, min(0.30, prior_adj_away)))
+
+    if xg_estimate is not None:
+        xg_h = xg_estimate.get("home_xg", 0.0)
+        xg_a = xg_estimate.get("away_xg", 0.0)
+        if xg_h > 0 and base_h > 0:
+            base_h = base_h * math.sqrt(xg_h / base_h)
+        if xg_a > 0 and base_a > 0:
+            base_a = base_a * math.sqrt(xg_a / base_a)
 
     clock = state.clock_minute if state.clock_minute is not None else 0.0
     if state.period == "1h":

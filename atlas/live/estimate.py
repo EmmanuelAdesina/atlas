@@ -31,6 +31,7 @@ from atlas.live.math_engine import (
     compute_posterior_intensities,
     effective_hazard_fraction,
     estimate_remaining_minutes,
+    estimate_xg_from_stats,
     expected_value_detailed,
     price_from_joint_matrix,
 )
@@ -402,12 +403,23 @@ class LiveStateSpaceModel:
 
         assert state.clock_minute is not None
         stoppage = estimate_remaining_minutes(state, period_scope=eff_scope)
+        xg_est = None
+        if state.home.shots_on_target is not None or state.away.shots_on_target is not None:
+            xg_est = estimate_xg_from_stats({
+                "shots_on_target_home": state.home.shots_on_target,
+                "shots_on_target_away": state.away.shots_on_target,
+                "shots_total_home": state.home.shots_total,
+                "shots_total_away": state.away.shots_total,
+                "corners_home": state.home.corners,
+                "corners_away": state.away.corners,
+            })
         post = compute_posterior_intensities(
             state,
             prior_home_lambda=self.prior_home_lambda,
             prior_away_lambda=self.prior_away_lambda,
             prior_adj_home=self.prior_adj_home,
             prior_adj_away=self.prior_adj_away,
+            xg_estimate=xg_est,
         )
 
         haz_mean = effective_hazard_fraction(
