@@ -22,9 +22,23 @@ from atlas.live.observe import LiveMatchState, TeamStats
 _ODDS_RE = re.compile(r"^\d+\.\d{2}$")
 _GLYPH_RE = re.compile(r"^[\ue000-\uf8ff]$")
 _CLOCK_RE = re.compile(r"^(\d+):(\d{2})(?:\s*\+(\d+):(\d{2}))?$")
+# Stoppage-only clock, e.g. '45+3' (base minute plus stoppage).
+_CLOCK_PLUS_RE = re.compile(r"^(\d+)\+(\d+)$")
 _SCORE_RE = re.compile(r"^(\d+)\s*:\s*(\d+)$")
 _NGN_BALANCE_RE = re.compile(r"^NGN\s+([\d,]+(?:\.\d+)?)$", re.IGNORECASE)
 _SUB_MINUTE_RE = re.compile(r"^\d+(?:\+\d+)?'$")
+
+# Scoreboard period token -> canonical period. Order is the priority: a
+# finished match wins over a live half, and HT wins over a half label.
+_PERIOD_TOKENS: tuple[tuple[str, str], ...] = (
+    ("Ended", "ft"),
+    ("FT", "ft"),
+    ("Full Time", "ft"),
+    ("HT", "ht"),
+    ("Half Time", "ht"),
+    ("2nd Half", "2h"),
+    ("1st Half", "1h"),
+)
 
 _TABS_ROW = {"All", "Main", "Goals", "Half", "Bookings", "Corners", "Specials", "Players"}
 _END_MARKERS = {"Betslip", "Cashout"}
@@ -83,12 +97,16 @@ def _looks_like_selection(tok: str) -> bool:
 
 
 def iter_texts(tree: Any) -> list[str]:
-    """DFS over snapshot nodes, returning StaticText/link/button names in order."""
+    """DFS over snapshot nodes, returning StaticText/link/button/div names in order.
+
+    The SportyBet scoreboard renders its score in divs that wrap children, so
+    'div' is included alongside the text roles or the score is never seen.
+    """
     out: list[str] = []
 
     def walk(n: Any) -> None:
         if isinstance(n, dict):
-            if n.get("role") in {"StaticText", "link", "button"} and n.get("name"):
+            if n.get("role") in {"StaticText", "link", "button", "div"} and n.get("name"):
                 out.append(str(n["name"]))
             children = n.get("children")
             if isinstance(children, list):
@@ -301,6 +319,29 @@ def _maybe_set_ou_line(market: dict, selection: str, odds: Optional[float] = Non
             market["line"] = float(m.group(2))
 
 
+def extract_score_from_dom(texts: list[str]) -> dict:
+    """Extract the live score from the scoreboard region of the snapshot texts.
+
+    SportyBet renders the score either as one token ('2:1', '2 : 1') or as three
+    consecutive tokens ('2', ':', '1'). The HT/FT split scores use the same
+    encoding, so the first match is the current score.
+    """
+    info: dict = {"home_goals": None, "away_goals": None}
+    board = [t.strip() for t in texts if t.strip()]
+    for t in board:
+        sm = _SCORE_RE.match(t)
+        if sm:
+            info["home_goals"] = int(sm.group(1))
+            info["away_goals"] = int(sm.group(2))
+            return info
+    for a, b, c in zip(board, board[1:], board[2:]):
+        if b == ":" and a.isdigit() and c.isdigit():
+            info["home_goals"] = int(a)
+            info["away_goals"] = int(c)
+            return info
+    return info
+
+
 def extract_clock_score(texts: list[str]) -> dict:
     """Best-effort clock/score/period read from the scoreboard region.
 
@@ -313,14 +354,10 @@ def extract_clock_score(texts: list[str]) -> dict:
         "home_goals": None,
         "away_goals": None,
     }
-    if "2nd Half" in texts:
-        info["period"] = "2h"
-    elif "1st Half" in texts:
-        info["period"] = "1h"
-    elif "Half Time" in texts or "HT" in texts:
-        info["period"] = "ht"
-    elif "Ended" in texts or "Full Time" in texts:
-        info["period"] = "ft"
+    for token, period in _PERIOD_TOKENS:
+        if token in texts:
+            info["period"] = period
+            break
     for t in texts:
         cm = _CLOCK_RE.match(t)
         if cm and info["clock_label"] is None:
@@ -336,26 +373,82 @@ def extract_clock_score(texts: list[str]) -> dict:
                 info["clock_minute"] = base_m + base_s / 60.0
                 info["clock_label"] = t
             break
-    # Score: 'N : M' either as one token or split across three tokens
-    # ('0', ':', '1') in the scoreboard area (before market tabs).
-    try:
-        tabs_at = next(i for i, t in enumerate(texts) if t == "All")
-    except StopIteration:
-        tabs_at = len(texts)
-    board = texts[:tabs_at]
-    for t in board:
-        sm = _SCORE_RE.match(t)
-        if sm:
-            info["home_goals"] = int(sm.group(1))
-            info["away_goals"] = int(sm.group(2))
+        pm = _CLOCK_PLUS_RE.match(t)
+        if pm and info["clock_label"] is None:
+            base = int(pm.group(1))
+            stoppage = int(pm.group(2))
+            info["clock_minute"] = base + stoppage
+            info["clock_label"] = t
             break
-    else:
-        for a, b, c in zip(board, board[1:], board[2:]):
-            if b == ":" and a.strip().isdigit() and c.strip().isdigit():
-                info["home_goals"] = int(a.strip())
-                info["away_goals"] = int(c.strip())
-                break
+    score = extract_score_from_dom(texts)
+    info["home_goals"] = score["home_goals"]
+    info["away_goals"] = score["away_goals"]
     return info
+
+
+def extract_stats_from_texts(texts: list[str]) -> dict:
+    """Parse the live statistics panel from snapshot texts.
+
+    The panel mixes two row layouts: some labels precede their values
+    ('CORNERS', '3', '1') and some follow them ('18', '20', 'FOULS'). Cards
+    split around the label. Values alternate home/away.
+    """
+    board = [t.strip() for t in texts if t.strip()]
+    try:
+        start = board.index("Statistics")
+    except ValueError:
+        start = 0
+
+    def pair_after(label: str) -> tuple[Optional[int], Optional[int]]:
+        for i in range(start, len(board) - 2):
+            if board[i] == label and board[i + 1].isdigit() and board[i + 2].isdigit():
+                return int(board[i + 1]), int(board[i + 2])
+        return None, None
+
+    def pair_before(label: str) -> tuple[Optional[int], Optional[int]]:
+        for i in range(start + 2, len(board)):
+            if board[i] == label and board[i - 2].isdigit() and board[i - 1].isdigit():
+                return int(board[i - 2]), int(board[i - 1])
+        return None, None
+
+    home_poss: Optional[float] = None
+    away_poss: Optional[float] = None
+    for i in range(start, len(board) - 4):
+        if board[i] == "BALL POSSESSION" and board[i + 1].isdigit() and board[i + 3].isdigit():
+            home_poss = float(board[i + 1])
+            away_poss = float(board[i + 3])
+            break
+
+    home_yellow: Optional[int] = None
+    home_red: Optional[int] = None
+    away_yellow: Optional[int] = None
+    away_red: Optional[int] = None
+    for i in range(start + 2, len(board) - 2):
+        if (
+            board[i] == "CARDS"
+            and board[i - 2].isdigit()
+            and board[i - 1].isdigit()
+            and board[i + 1].isdigit()
+            and board[i + 2].isdigit()
+        ):
+            home_red = int(board[i - 2])
+            home_yellow = int(board[i - 1])
+            away_yellow = int(board[i + 1])
+            away_red = int(board[i + 2])
+            break
+
+    h_corners, a_corners = pair_after("CORNERS")
+    h_sot, a_sot = pair_after("ON TARGET")
+    h_fouls, a_fouls = pair_before("FOULS")
+
+    return {
+        "possession_pct": {"home": home_poss, "away": away_poss},
+        "shots_on_target": {"home": h_sot, "away": a_sot},
+        "corners": {"home": h_corners, "away": a_corners},
+        "yellow_cards": {"home": home_yellow, "away": away_yellow},
+        "red_cards": {"home": home_red, "away": away_red},
+        "fouls": {"home": h_fouls, "away": a_fouls},
+    }
 
 
 def extract_live_match_state(
@@ -364,14 +457,8 @@ def extract_live_match_state(
     observed_at: Optional[datetime] = None,
     source_url: str = "",
     source: str = "sportybet_browser",
-    prematch_1x2_odds: Optional[dict[str, float]] = None,
-    card_minute: Optional[float] = None,
 ) -> LiveMatchState:
-    """Extract a LiveMatchState from snapshot text.
-
-    Pre-match odds, if available, must be supplied separately; current live
-    prices are never inferred or reused as pre-match priors.
-    """
+    """Extract full LiveMatchState (including team names, HT score, cards, corners, shots, possession, subs) from snapshot texts."""
     observed_at = observed_at or datetime.now(timezone.utc)
     basic = extract_clock_score(texts)
 
@@ -523,8 +610,6 @@ def extract_live_match_state(
         substitutions_count=subs_count,
         remaining_unknown=in_stoppage_unknown,
         account_balance_ngn=balance_ngn,
-        prematch_1x2_odds=prematch_1x2_odds,
-        card_minute=card_minute,
         observed_at=observed_at,
         source=source,
         source_url=source_url,

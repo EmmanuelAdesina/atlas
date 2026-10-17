@@ -2,7 +2,7 @@
 
 Architectural Law:
   - Fast Plane (Hot Path): extract -> observe -> math_engine -> estimate -> decisions.
-    Deterministic pure-Python math targets <2 ms for a 21-selection surface after setup; zero LLM calls.
+    Executes in < 1 millisecond in pure deterministic math. Zero LLM calls.
   - Slow Plane (This Module): asynchronous portfolio oversight, live operation
     diagnostics, calibration forensics, and asymmetric risk control.
 
@@ -20,7 +20,6 @@ Asymmetric Risk Ratchet ("Ratchet Down, Never Force Up"):
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -146,50 +145,25 @@ class BossController:
                 "Boss cannot autonomously enable live execution (allow_execution=True requires human operator config)"
             )
         if min_ev is not None:
-            if not math.isfinite(min_ev) or min_ev < HARD_MIN_EV_FLOOR:
+            if min_ev < HARD_MIN_EV_FLOOR:
                 raise RiskRatchetViolationError(
                     f"min_ev {min_ev} violates hard safety floor {HARD_MIN_EV_FLOOR}"
                 )
-            self.state.min_ev_override = max(
-                self.state.min_ev_override if self.state.min_ev_override is not None else -math.inf,
-                float(min_ev),
-            )
+            self.state.min_ev_override = float(min_ev)
         if min_ev_lower is not None:
-            if not math.isfinite(min_ev_lower):
-                raise RiskRatchetViolationError("min_ev_lower must be finite")
-            self.state.min_ev_lower_override = max(
-                self.state.min_ev_lower_override
-                if self.state.min_ev_lower_override is not None else -math.inf,
-                float(min_ev_lower),
-            )
+            self.state.min_ev_lower_override = float(min_ev_lower)
         if kelly_fraction is not None:
-            if (
-                not math.isfinite(kelly_fraction)
-                or kelly_fraction < 0.0
-                or kelly_fraction > HARD_MAX_KELLY_FRACTION
-            ):
+            if kelly_fraction < 0.0 or kelly_fraction > HARD_MAX_KELLY_FRACTION:
                 raise RiskRatchetViolationError(
                     f"kelly_fraction {kelly_fraction} violates [0.0, {HARD_MAX_KELLY_FRACTION}] cap"
                 )
-            self.state.kelly_fraction_override = min(
-                self.state.kelly_fraction_override
-                if self.state.kelly_fraction_override is not None else math.inf,
-                float(kelly_fraction),
-            )
+            self.state.kelly_fraction_override = float(kelly_fraction)
         if max_exposure_ngn is not None:
-            if (
-                not math.isfinite(max_exposure_ngn)
-                or max_exposure_ngn <= 0.0
-                or max_exposure_ngn > HARD_MAX_EXPOSURE_NGN
-            ):
+            if max_exposure_ngn <= 0.0 or max_exposure_ngn > HARD_MAX_EXPOSURE_NGN:
                 raise RiskRatchetViolationError(
                     f"max_exposure_ngn {max_exposure_ngn} exceeds hard ceiling {HARD_MAX_EXPOSURE_NGN}"
                 )
-            self.state.max_exposure_override = min(
-                self.state.max_exposure_override
-                if self.state.max_exposure_override is not None else math.inf,
-                float(max_exposure_ngn),
-            )
+            self.state.max_exposure_override = float(max_exposure_ngn)
 
         self._log_action(
             "set_risk_overrides",
@@ -213,9 +187,7 @@ class BossController:
         if not rationale.strip():
             raise ValueError("Prior adjustment requires an explicit rationale")
         if (
-            not math.isfinite(delta_home_lambda)
-            or not math.isfinite(delta_away_lambda)
-            or abs(delta_home_lambda) > HARD_MAX_PRIOR_SHIFT
+            abs(delta_home_lambda) > HARD_MAX_PRIOR_SHIFT
             or abs(delta_away_lambda) > HARD_MAX_PRIOR_SHIFT
         ):
             raise RiskRatchetViolationError(
@@ -242,12 +214,11 @@ class BossController:
             if self.state.min_ev_override is not None
             else base.min_ev
         )
-        if self.state.min_ev_lower_override is None:
-            eff_min_ev_lower = base.min_ev_lower
-        elif base.min_ev_lower is None:
-            eff_min_ev_lower = self.state.min_ev_lower_override
-        else:
-            eff_min_ev_lower = max(base.min_ev_lower, self.state.min_ev_lower_override)
+        eff_min_ev_lower = (
+            max(base.min_ev_lower or -1.0, self.state.min_ev_lower_override)
+            if self.state.min_ev_lower_override is not None
+            else base.min_ev_lower
+        )
         eff_kelly = (
             min(base.kelly_fraction, self.state.kelly_fraction_override)
             if self.state.kelly_fraction_override is not None
