@@ -24,6 +24,7 @@ from atlas.live.decisions import (
     compute_recommended_stake_ngn,
 )
 from atlas.live.estimate import (
+    CalibratedModel,
     Estimate,
     LiveStateSpaceModel,
     NoMoreGoalsBaseline,
@@ -280,6 +281,45 @@ def test_full_match_hazard_is_normalized_to_full_match_prior():
     assert est.diagnostics["mu_away_rem"] == pytest.approx(1.18)
 
 
+def test_second_half_stoppage_hazard_ramps_while_full_match_normalization_holds():
+    early_stoppage = effective_hazard_fraction("2h", 90.0, 3.0)
+    later_stoppage = effective_hazard_fraction("2h", 93.0, 3.0)
+    assert later_stoppage > early_stoppage
+
+    kickoff = _sample_midgame_state(clock_minute=0.0, home_goals=0, away_goals=0)
+    kickoff = kickoff.model_copy(update={
+        "period": "1h",
+        "home": kickoff.home.model_copy(update={"goals": 0}),
+        "away": kickoff.away.model_copy(update={"goals": 0}),
+    })
+    remaining = estimate_remaining_minutes(kickoff, period_scope="full")
+    assert effective_hazard_fraction("1h", 0.0, remaining.rem_mean) == pytest.approx(1.0)
+
+
+def test_red_card_multiplier_decays_as_remaining_time_shrinks():
+    early = _sample_midgame_state(clock_minute=60.0, home_reds=1).model_copy(
+        update={"card_minute": 55.0}
+    )
+    late = _sample_midgame_state(clock_minute=93.7, home_reds=1).model_copy(
+        update={"card_minute": 80.0}
+    )
+    early_post = compute_posterior_intensities(early)
+    late_post = compute_posterior_intensities(late)
+    assert early_post.red_card_multiplier_home < late_post.red_card_multiplier_home < 1.0
+
+
+def test_half_time_is_live_and_prices_second_half_markets():
+    state = _sample_midgame_state(clock_minute=45.0, home_goals=1, away_goals=0)
+    halftime = state.model_copy(update={"period": "ht"})
+    assert halftime.is_live
+
+    model = LiveStateSpaceModel(now=NOW)
+    at_halftime = model.estimate(halftime, "1x2_2h", "Home")
+    at_second_half_start = model.estimate(state, "1x2_2h", "Home")
+    assert not at_halftime.abstained
+    assert at_halftime.p == pytest.approx(at_second_half_start.p)
+
+
 def test_first_half_stoppage_uncertainty_is_propagated_to_full_match():
     state = _sample_midgame_state(clock_minute=47.0, home_goals=0, away_goals=0)
     state = state.model_copy(update={
@@ -318,7 +358,23 @@ def test_surface_cache_tracks_all_pressure_and_stoppage_inputs():
         assert updated.diagnostics["mu_home_rem"] != pytest.approx(base.diagnostics["mu_home_rem"])
 
 
+def test_surface_cache_tracks_red_card_timing():
+    state = _sample_midgame_state(clock_minute=62.0, home_goals=1, away_goals=1)
+    state = state.model_copy(update={
+        "home": state.home.model_copy(update={"red_cards": 1}),
+        "card_minute": 20.0,
+    })
+    later_card = state.model_copy(update={"card_minute": 80.0})
+    model = LiveStateSpaceModel(now=NOW)
+    early_estimate = model.estimate(state, "ou_2_5", "Over 2.5")
+    later_estimate = model.estimate(later_card, "ou_2_5", "Over 2.5")
+    assert early_estimate.diagnostics["mu_home_rem"] != pytest.approx(
+        later_estimate.diagnostics["mu_home_rem"]
+    )
+
+
 def test_score_state_is_symmetric_and_possession_alone_does_not_zero_pressure():
+
     base = _sample_midgame_state(clock_minute=75.0, home_goals=0, away_goals=0)
     for margin in (1, 2):
         home_leads = base.model_copy(update={
@@ -410,6 +466,58 @@ def test_state_space_quarter_line_probability_is_full_win_not_effective_win():
         2.0, p_win=est.p, p_push=est.p_push,
         p_half_win=est.p_half_win, p_half_loss=est.p_half_loss,
     ))
+
+
+def test_market_calibration_uses_exact_market_and_preserves_scenarios():
+    class FixedModel:
+        model_name = "fixed"
+
+        def __init__(self, estimate):
+            self.current = estimate
+
+        def estimate(self, state, market_key, selection):
+            return self.current
+
+    base = Estimate(
+        p=0.80,
+        confidence="medium",
+        model_name="fixed",
+        p_lower=0.70,
+        p_upper=0.90,
+        settlement_scenarios=[
+            (0.70, 0.0, 0.0, 0.0),
+            (0.80, 0.0, 0.0, 0.0),
+            (0.90, 0.0, 0.0, 0.0),
+        ],
+    )
+    model = CalibratedModel(
+        base_model=FixedModel(base),
+        market_fair={
+            ("1x2_2h", "Away"): 0.60,
+            ("rest_of_match_1x2", "Away"): 0.10,
+            ("dnb", "Home"): 0.90,
+        },
+    )
+    state = _sample_midgame_state()
+    calibrated = model.estimate(state, "1x2_2h", "Away")
+    assert calibrated.p == pytest.approx(0.70)
+    assert calibrated.p_lower == pytest.approx(0.65)
+    assert calibrated.p_upper == pytest.approx(0.75)
+    assert calibrated.diagnostics["market_p"] == pytest.approx(0.60)
+    assert len(calibrated.settlement_scenarios) == 4
+
+    split_base = Estimate(
+        p=0.50,
+        confidence="medium",
+        model_name="fixed",
+        p_push=0.20,
+        settlement_scenarios=[(0.50, 0.20, 0.0, 0.0)],
+    )
+    model.base_model.current = split_base
+    skipped = model.estimate(state, "dnb", "Home")
+    assert skipped.p == pytest.approx(0.50)
+    assert skipped.p_push == pytest.approx(0.20)
+    assert skipped.diagnostics["calibration_status"] == "skipped: split-settlement market"
 
 
 def test_conservative_ev_uses_one_complete_worst_case_settlement():

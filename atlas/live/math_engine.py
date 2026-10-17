@@ -42,15 +42,17 @@ _REGULATION_HAZARD_BUCKETS: tuple[tuple[float, float, float], ...] = (
     (75.0, 90.0, 1.24),
 )
 _STOPPAGE_1H_HAZARD = 1.10
-_STOPPAGE_2H_HAZARD = 1.36
+_STOPPAGE_2H_INITIAL_HAZARD = 1.0
 # Expected baseline stoppage from the smooth-residual estimator at kickoff
 # (2.0' prior with 0.75' floor; 4.2' prior with 0.85' floor).
 _STANDARD_1H_STOPPAGE_MINUTES = 0.5 * (2.0 + math.sqrt(2.0**2 + 4.0 * 0.75**2))
 _STANDARD_2H_STOPPAGE_MINUTES = 0.5 * (4.2 + math.sqrt(4.2**2 + 4.0 * 0.85**2))
+# The 2H stoppage hazard starts at 1.0 and ramps as stoppage elapses; normalize
+# the full-match prior to that same kickoff convention.
 _STANDARD_MATCH_HAZARD_MINS = (
     sum((hi - lo) * rate for lo, hi, rate in _REGULATION_HAZARD_BUCKETS)
     + _STANDARD_1H_STOPPAGE_MINUTES * _STOPPAGE_1H_HAZARD
-    + _STANDARD_2H_STOPPAGE_MINUTES * _STOPPAGE_2H_HAZARD
+    + _STANDARD_2H_STOPPAGE_MINUTES * _STOPPAGE_2H_INITIAL_HAZARD
 )
 
 
@@ -250,7 +252,14 @@ def estimate_remaining_minutes(
     if state.added_minutes_announced is not None:
         prior_stop_2h = float(state.added_minutes_announced) + 0.35
     else:
-        prior_stop_2h = 4.2 + 0.45 * goals_2h + 0.25 * min(subs, 10) + 0.55 * reds
+        card_minute = state.red_card_minute if state.red_card_minute is not None else 45.0
+        card_weight = max(0.0, min(1.0, (90.0 - card_minute) / 90.0))
+        prior_stop_2h = (
+            4.2
+            + 0.45 * goals_2h
+            + 0.25 * min(subs, 10)
+            + 0.55 * reds * card_weight
+        )
 
     reg_rem_2h = max(0.0, 90.0 - clock)
     elapsed_stop_2h = max(0.0, clock - 90.0)
@@ -306,7 +315,7 @@ def effective_hazard_fraction(
             hazard_mins += stop_1h * _STOPPAGE_1H_HAZARD
             for b_lo, b_hi, rate in _REGULATION_HAZARD_BUCKETS[3:]:
                 hazard_mins += (b_hi - b_lo) * rate
-            hazard_mins += _STANDARD_2H_STOPPAGE_MINUTES * _STOPPAGE_2H_HAZARD
+            hazard_mins += _STANDARD_2H_STOPPAGE_MINUTES * _STOPPAGE_2H_INITIAL_HAZARD
         else:
             hazard_mins += stop_play * _STOPPAGE_1H_HAZARD
         return hazard_mins / _STANDARD_MATCH_HAZARD_MINS
@@ -321,7 +330,12 @@ def effective_hazard_fraction(
     for b_lo, b_hi, rate in _REGULATION_HAZARD_BUCKETS[3:]:
         overlap = max(0.0, min(t_end, b_hi) - max(t_start, b_lo))
         hazard_mins += overlap * rate
-    hazard_mins += stop_play * _STOPPAGE_2H_HAZARD
+    if stop_play > 0.0:
+        # Local stoppage hazard rises as elapsed stoppage approaches its total.
+        stoppage_elapsed = max(0.0, clock_minute - 90.0)
+        stoppage_total = stoppage_elapsed + stop_play
+        stoppage_hazard = 1.0 + 0.5 * (stoppage_elapsed / stoppage_total)
+        hazard_mins += stop_play * stoppage_hazard
     return hazard_mins / _STANDARD_MATCH_HAZARD_MINS
 
 
@@ -425,8 +439,10 @@ def compute_posterior_intensities(
     else:
         minutes_played = max(1.0, clock)
 
-    # Empirical Bayes live pressure rate. Possession is only a modifier to
-    # observed attacking events; by itself it must not imply a zero shot rate.
+    # Estimated time remaining and empirical-Bayes pressure observations. Possession
+    # alone is not attacking-event evidence and must not imply a zero shot rate.
+    remaining_minutes = estimate_remaining_minutes(state, period_scope="full").rem_mean
+
     def has_pressure_stats(team) -> bool:
         return any(
             x is not None
@@ -465,34 +481,44 @@ def compute_posterior_intensities(
             base_weight * (1.0 if state.away.shots_on_target is not None else 0.20)
             if has_a_stats else 0.0
         )
-        post_h = (1.0 - w_h) * base_h + w_h * max(0.30, min(3.80, live_rate_h))
-        post_a = (1.0 - w_a) * base_a + w_a * max(0.25, min(3.80, live_rate_a))
+        post_h = (1.0 - w_h) * base_h + w_h * max(0.10, min(3.80, live_rate_h))
+        post_a = (1.0 - w_a) * base_a + w_a * max(0.10, min(3.80, live_rate_a))
         w_stat = 0.5 * (w_h + w_a)
     else:
         w_stat = 0.0
         post_h, post_a = base_h, base_a
 
-    # Markov Red-Card Manpower Multipliers
+    # Markov Red-Card Manpower Multipliers (decayed by remaining playing time)
     h_reds = state.home_reds
     a_reds = state.away_reds
     if h_reds == 0 and a_reds == 0:
-        rc_h, rc_a = 1.0, 1.0
+        rc_h_full, rc_a_full = 1.0, 1.0
     elif h_reds > 0 and a_reds == 0:
-        rc_h = 0.68 ** h_reds
-        rc_a = 1.32 ** min(h_reds, 2)
+        rc_h_full = 0.68 ** h_reds
+        rc_a_full = 1.32 ** min(h_reds, 2)
     elif a_reds > 0 and h_reds == 0:
-        rc_h = 1.32 ** min(a_reds, 2)
-        rc_a = 0.68 ** a_reds
+        rc_h_full = 1.32 ** min(a_reds, 2)
+        rc_a_full = 0.68 ** a_reds
     else:
         # Equal dismissals are neutral absent reliable evidence that 10v10
         # raises total scoring. Only the net manpower differential is applied.
         net_adv = a_reds - h_reds
-        rc_h = (1.28 ** max(0, net_adv)) * (0.72 ** max(0, -net_adv))
-        rc_a = (1.28 ** max(0, -net_adv)) * (0.72 ** max(0, net_adv))
+        rc_h_full = (1.28 ** max(0, net_adv)) * (0.72 ** max(0, -net_adv))
+        rc_a_full = (1.28 ** max(0, -net_adv)) * (0.72 ** max(0, net_adv))
+
+    # Late cards have little time to affect the remaining-goal expectation.
+    decay = max(0.0, min(1.0, remaining_minutes / 30.0))
+    rc_h = 1.0 + decay * (rc_h_full - 1.0)
+    rc_a = 1.0 + decay * (rc_a_full - 1.0)
 
     # Score-State Tempo Multipliers (late 2nd half trailing urgency vs leading conservatism)
     ss_h, ss_a = 1.0, 1.0
-    if state.home.goals is not None and state.away.goals is not None and clock >= 60.0:
+    if (
+        state.home.goals is not None
+        and state.away.goals is not None
+        and clock >= 60.0
+        and remaining_minutes >= 10.0
+    ):
         diff = state.home.goals - state.away.goals
         if diff > 0:  # Home leads; away is trailing.
             ss_h, ss_a = 0.94, 1.12
@@ -551,7 +577,7 @@ def build_remaining_score_matrix(
     mu_away: float,
     rho: float = -0.06,
     shared_tempo_frac: float = 0.05,
-    max_goals: int = 8,
+    max_goals: int = 10,
 ) -> list[list[float]]:
     """Build exact (max_goals+1) x (max_goals+1) joint probability matrix P(Delta G_H = i, Delta G_A = j).
 
@@ -696,6 +722,9 @@ def price_from_joint_matrix(
                 return None
             return (cur_h, cur_a)
         if scope == "2h":
+            if state.period == "ht":
+                # At halftime no second-half goals have occurred yet.
+                return (0, 0)
             if state.period != "2h":
                 return None
             if state.half_home_goals is None or state.half_away_goals is None:
@@ -721,7 +750,10 @@ def price_from_joint_matrix(
         return p_h, p_d, p_a
 
     # 1. 1X2 Family (Full Time, 1st Half, 2nd Half, Rest of Match)
-    if mkey in ("1x2", "1x2_1h", "1x2_2h", "rest_of_match", "rest_of_match_1x2"):
+    if mkey in (
+        "1x2", "1x2_1h", "1x2_2h",
+        "rest_of_match", "rest_of_match_1x2", "1x2_rest",
+    ):
         scope = (
             "1h"
             if mkey == "1x2_1h"

@@ -47,6 +47,10 @@ class LiveMatchState(BaseModel):
     half_away_goals: Optional[int] = None
     substitutions_count: Optional[int] = None
     added_minutes_announced: Optional[int] = None
+    card_minute: Optional[float] = Field(
+        default=None,
+        description="Minute the (latest) red card was shown, if known",
+    )
     remaining_unknown: bool = Field(
         default=False, description="True when stoppage length / whistle timing is unknown"
     )
@@ -91,7 +95,7 @@ class LiveMatchState(BaseModel):
 
     @property
     def is_live(self) -> bool:
-        return self.period in {"1h", "2h"}
+        return self.period in {"1h", "2h", "ht"}
 
     @property
     def home_reds(self) -> int:
@@ -100,6 +104,11 @@ class LiveMatchState(BaseModel):
     @property
     def away_reds(self) -> int:
         return self.away.red_cards or 0
+
+    @property
+    def red_card_minute(self) -> Optional[float]:
+        """Alias for `card_minute` (minute the latest red card was shown)."""
+        return self.card_minute
 
     def age_seconds(self, now: Optional[datetime] = None) -> float:
         now = now or datetime.now(timezone.utc)
@@ -118,6 +127,7 @@ class LiveMatchState(BaseModel):
             "score": [self.home.goals, self.away.goals],
             "home_reds": self.home_reds,
             "away_reds": self.away_reds,
+            "card_minute": self.card_minute,
             "observed_at": self.observed_at.isoformat(),
             "source": self.source,
             "prematch_1x2_odds": self.prematch_1x2_odds,

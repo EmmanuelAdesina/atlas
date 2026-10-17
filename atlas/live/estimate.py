@@ -465,6 +465,7 @@ class LiveStateSpaceModel:
             state.half_away_goals,
             state.home_reds,
             state.away_reds,
+            state.card_minute,
             state.home.shots_on_target,
             state.away.shots_on_target,
             state.home.shots_total,
@@ -514,7 +515,7 @@ class LiveStateSpaceModel:
 
         mu_h = post.lambda_home_90 * haz_mean
         mu_a = post.lambda_away_90 * haz_mean
-        max_g = 6 if (mu_h + mu_a) < 0.6 else 8
+        max_g = 6 if (mu_h + mu_a) < 0.6 else 10
 
         mat_nom = build_remaining_score_matrix(
             mu_h,
@@ -686,5 +687,130 @@ class LiveStateSpaceModel:
             p_half_win=nom_out.p_half_win,
             p_half_loss=nom_out.p_half_loss,
             settlement_scenarios=settlement_samples,
+            diagnostics=diagnostics,
+        )
+
+
+@dataclass
+class CalibratedModel:
+    """Optionally shrink binary settlement probabilities toward exact-market fair odds.
+
+    Calibration uses only the same canonical market key and selection; related
+    but differently scoped markets (for example, rest-of-match versus full-time
+    1X2) are not interchangeable. Raw market fair probabilities are not used
+    for push or split-settlement selections.
+    """
+
+    base_model: MarketModel
+    market_fair: dict[tuple[str, str], float] = field(default_factory=dict)
+    model_name: str = "calibrated_v1"
+
+    _SHRINK = {"high": 0.0, "medium": 0.5, "low": 0.75}
+
+    def estimate(
+        self, state: LiveMatchState, market_key: str, selection: str
+    ) -> Estimate:
+        base = self.base_model.estimate(state, market_key, selection)
+        if base.abstained or base.p is None:
+            return base
+
+        shrink = self._SHRINK.get(base.confidence, 0.75)
+        diagnostics = {**base.diagnostics, "shrink_pct": shrink * 100.0}
+        unchanged = (
+            base.p,
+            base.p_lower,
+            base.p_upper,
+            base.p_push,
+            base.p_half_win,
+            base.p_half_loss,
+            list(base.settlement_scenarios),
+        )
+        if shrink == 0.0:
+            p, p_lower, p_upper, p_push, p_half_win, p_half_loss, scenarios = unchanged
+            return Estimate(
+                p=p,
+                confidence=base.confidence,
+                model_name=self.model_name,
+                evidence_age_s=base.evidence_age_s,
+                abstain_reason=base.abstain_reason,
+                p_lower=p_lower,
+                p_upper=p_upper,
+                p_push=p_push,
+                p_half_win=p_half_win,
+                p_half_loss=p_half_loss,
+                settlement_scenarios=scenarios,
+                diagnostics=diagnostics,
+            )
+
+        market_p = self.market_fair.get((market_key, selection))
+        if market_p is None:
+            diagnostics["calibration_status"] = "skipped: no exact-market fair probability"
+            p, p_lower, p_upper, p_push, p_half_win, p_half_loss, scenarios = unchanged
+            return Estimate(
+                p=p,
+                confidence=base.confidence,
+                model_name=self.model_name,
+                evidence_age_s=base.evidence_age_s,
+                abstain_reason=base.abstain_reason,
+                p_lower=p_lower,
+                p_upper=p_upper,
+                p_push=p_push,
+                p_half_win=p_half_win,
+                p_half_loss=p_half_loss,
+                settlement_scenarios=scenarios,
+                diagnostics=diagnostics,
+            )
+
+        market_p = float(market_p)
+        if not math.isfinite(market_p) or not 0.0 <= market_p <= 1.0:
+            raise ValueError("market fair probability must be finite and in [0, 1]")
+
+        source_scenarios = base.settlement_scenarios or [
+            (p, 0.0, 0.0, 0.0)
+            for p in (base.p_lower if base.p_lower is not None else base.p,
+                      base.p,
+                      base.p_upper if base.p_upper is not None else base.p)
+        ]
+        if any(
+            p_push > 0.0 or p_half_win > 0.0 or p_half_loss > 0.0
+            for _, p_push, p_half_win, p_half_loss in source_scenarios
+        ) or base.p_push > 0.0 or base.p_half_win > 0.0 or base.p_half_loss > 0.0:
+            diagnostics["calibration_status"] = "skipped: split-settlement market"
+            p, p_lower, p_upper, p_push, p_half_win, p_half_loss, scenarios = unchanged
+            return Estimate(
+                p=p,
+                confidence=base.confidence,
+                model_name=self.model_name,
+                evidence_age_s=base.evidence_age_s,
+                abstain_reason=base.abstain_reason,
+                p_lower=p_lower,
+                p_upper=p_upper,
+                p_push=p_push,
+                p_half_win=p_half_win,
+                p_half_loss=p_half_loss,
+                settlement_scenarios=scenarios,
+                diagnostics=diagnostics,
+            )
+
+        def blend(probability: float) -> float:
+            return min(1.0, max(0.0, probability * (1.0 - shrink) + market_p * shrink))
+
+        calibrated_p = blend(base.p)
+        calibrated_scenarios = [(blend(s[0]), 0.0, 0.0, 0.0) for s in source_scenarios]
+        calibrated_scenarios.append((calibrated_p, 0.0, 0.0, 0.0))
+        diagnostics.update({
+            "calibration_status": "applied",
+            "market_p": round(market_p, 4),
+            "raw_model_p": round(base.p, 4),
+        })
+        return Estimate(
+            p=calibrated_p,
+            confidence=base.confidence,
+            model_name=self.model_name,
+            evidence_age_s=base.evidence_age_s,
+            abstain_reason=base.abstain_reason,
+            p_lower=min(s[0] for s in calibrated_scenarios),
+            p_upper=max(s[0] for s in calibrated_scenarios),
+            settlement_scenarios=calibrated_scenarios,
             diagnostics=diagnostics,
         )
