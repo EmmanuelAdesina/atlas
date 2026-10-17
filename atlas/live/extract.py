@@ -45,7 +45,7 @@ _HEADER_PATTERNS: list[tuple[re.Pattern, Any]] = [
     (re.compile(r"^(?:GG/NG|Both Teams To Score)$", re.IGNORECASE), ("btts", None, "full")),
     (re.compile(r"^1st Half - (?:GG/NG|Both Teams To Score)$", re.IGNORECASE), ("1h_btts", None, "1h")),
     (re.compile(r"^2nd Half - (?:GG/NG|Both Teams To Score)$", re.IGNORECASE), ("2h_btts", None, "2h")),
-    (re.compile(r"^Rest of the Match$"), ("rest_of_match_1x2", None, "full")),
+    (re.compile(r"^Rest of the Match"), ("rest_of_match_1x2", None, "full")),
     (re.compile(r"^Over/Under$"), (None, None, "full")),  # line from selections
     (re.compile(r"^Home Team Over/Under$"), ("home_ou_pending", None, "full")),
     (re.compile(r"^Away Team Over/Under$"), ("away_ou_pending", None, "full")),

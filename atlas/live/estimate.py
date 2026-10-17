@@ -422,7 +422,7 @@ class LiveStateSpaceModel:
 
         mu_h = post.lambda_home_90 * haz_mean
         mu_a = post.lambda_away_90 * haz_mean
-        max_g = 6 if (mu_h + mu_a) < 0.6 else 8
+        max_g = 6 if (mu_h + mu_a) < 0.6 else 10
 
         mat_nom = build_remaining_score_matrix(
             mu_h,
@@ -561,4 +561,95 @@ class LiveStateSpaceModel:
             p_half_win=nom_out.p_half_win,
             p_half_loss=nom_out.p_half_loss,
             diagnostics=diagnostics,
+        )
+
+
+@dataclass
+class CalibratedModel:
+    """Wraps a base MarketModel with market-implied calibration.
+
+    When the base model's confidence is low, probabilities are shrunk toward
+    the market-implied (Shin de-vigged) probabilities. This counteracts the
+    systematic overconfidence observed in backtests (model more extreme than
+    market in both directions).
+
+    The shrinkage weight is proportional to (1 - confidence_score):
+      confidence high   → 0% shrink (trust the model)
+      confidence medium → 50% shrink
+      confidence low    → 75% shrink (mostly trust the market)
+
+    The market-implied probabilities come from the 'Rest of the Match' market
+    when available (it is the market's own conditional estimate given the
+    current score), otherwise from the selection's own market.
+    """
+
+    base_model: MarketModel
+    market_fair: dict[tuple[str, str], float] = field(default_factory=dict)
+    model_name: str = "calibrated_v1"
+
+    _SHRINK = {"high": 0.0, "medium": 0.5, "low": 0.75}
+
+    def estimate(
+        self, state: LiveMatchState, market_key: str, selection: str
+    ) -> Estimate:
+        base = self.base_model.estimate(state, market_key, selection)
+        if base.abstained or base.p is None:
+            return base
+
+        shrink = self._SHRINK.get(base.confidence, 0.75)
+        if shrink == 0.0:
+            return Estimate(
+                p=base.p, confidence=base.confidence,
+                model_name=self.model_name,
+                evidence_age_s=base.evidence_age_s,
+                p_lower=base.p_lower, p_upper=base.p_upper,
+                p_push=base.p_push, p_half_win=base.p_half_win,
+                p_half_loss=base.p_half_loss,
+                diagnostics={**base.diagnostics, "shrink_pct": 0.0},
+            )
+
+        # Calibrate using Rest-of-Match only when selection semantics are identical.
+        # 1x2 Home/Draw/Away in Rest-of-Match means the same as 1x2 full-time.
+        # But 1x2_2up/Away means "home wins by 3+" — NOT the same as rest_of_match/Away.
+        # Calibrating across different meanings produces fake edges.
+        mkt_key = market_key
+        rest_key = None
+        for rk in ("rest_of_match_1x2", "1x2_rest"):
+            if (rk, selection) in self.market_fair:
+                rest_key = rk
+                break
+        # Only calibrate 1x2 (full/1h/2h) using Rest-of-Match — same selection semantics
+        if rest_key and market_key in ("1x2", "1x2_1h", "1x2_2h"):
+            mkt_key = rest_key
+
+        market_p = self.market_fair.get((mkt_key, selection))
+        if market_p is None:
+            market_p = self.market_fair.get((market_key, selection))
+        if market_p is None:
+            return Estimate(
+                p=base.p, confidence=base.confidence,
+                model_name=self.model_name,
+                evidence_age_s=base.evidence_age_s,
+                abstain_reason="calibration skipped: no market-implied prob available",
+                p_lower=base.p_lower, p_upper=base.p_upper,
+                diagnostics={**base.diagnostics, "shrink_pct": shrink * 100},
+            )
+
+        calibrated_p = base.p * (1.0 - shrink) + market_p * shrink
+        calibrated_p = min(1.0, max(0.0, calibrated_p))
+
+        return Estimate(
+            p=calibrated_p,
+            confidence=base.confidence,
+            model_name=self.model_name,
+            evidence_age_s=base.evidence_age_s,
+            p_lower=base.p_lower, p_upper=base.p_upper,
+            p_push=base.p_push, p_half_win=base.p_half_win,
+            p_half_loss=base.p_half_loss,
+            diagnostics={
+                **base.diagnostics,
+                "shrink_pct": shrink * 100,
+                "market_p": round(market_p, 4),
+                "raw_model_p": round(base.p, 4),
+            },
         )

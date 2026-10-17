@@ -233,7 +233,14 @@ def estimate_remaining_minutes(
     if state.added_minutes_announced is not None:
         prior_stop_2h = float(state.added_minutes_announced) + 0.35
     else:
-        prior_stop_2h = 4.2 + 0.45 * goals_2h + 0.25 * min(subs, 10) + 0.55 * reds
+        card_minute = state.red_card_minute if state.red_card_minute is not None else 45.0
+        card_weight = max(0.0, min(1.0, (90.0 - card_minute) / 90.0))
+        prior_stop_2h = (
+            4.2
+            + 0.45 * goals_2h
+            + 0.25 * min(subs, 10)
+            + 0.55 * reds * card_weight
+        )
 
     reg_rem_2h = max(0.0, 90.0 - clock)
     elapsed_stop_2h = max(0.0, clock - 90.0)
@@ -301,7 +308,14 @@ def effective_hazard_fraction(
     for b_lo, b_hi, rate in _REGULATION_HAZARD_BUCKETS[3:]:
         overlap = max(0.0, min(t_end, b_hi) - max(t_start, b_lo))
         hazard_mins += overlap * rate
-    hazard_mins += stop_play * _STOPPAGE_2H_HAZARD
+    if stop_play > 0.0:
+        # Stoppage hazard ramps up as stoppage progresses (late-risk escalation).
+        stoppage_elapsed = max(0.0, clock_minute - 90.0)
+        stoppage_total = stoppage_elapsed + stop_play
+        stoppage_hazard = 1.0 + 0.5 * (stoppage_elapsed / stoppage_total)
+        hazard_mins += stop_play * stoppage_hazard
+    else:
+        hazard_mins += stop_play * _STOPPAGE_2H_HAZARD
     return hazard_mins / 90.0
 
 
@@ -340,9 +354,9 @@ def infer_prematch_lambdas_from_1x2(
             lh = max(0.25, min(4.2, lh_center + i * step))
             for j in range(-6, 7):
                 la = max(0.20, min(4.2, la_center + j * step))
-                mat = build_remaining_score_matrix(lh, la, rho=-0.08, max_goals=8)
-                ph = sum(mat[r][c] for r in range(9) for c in range(r))
-                pd = sum(mat[r][r] for r in range(9))
+                mat = build_remaining_score_matrix(lh, la, rho=-0.06, max_goals=10)
+                ph = sum(mat[r][c] for r in range(11) for c in range(r))
+                pd = sum(mat[r][r] for r in range(11))
                 loss = (ph - target_h) ** 2 + 1.5 * (pd - target_d) ** 2
                 if loss < best_loss:
                     best_loss = loss
@@ -370,6 +384,9 @@ def compute_posterior_intensities(
         minutes_played = max(45.0, min(clock, 98.0))
     else:
         minutes_played = max(1.0, clock)
+
+    # Estimated minutes still to be played (regulation + stoppage) for timing gates.
+    remaining_minutes = estimate_remaining_minutes(state, period_scope="full").rem_mean
 
     # Empirical Bayes live pressure rate from shots on target, off-target attempts,
     # corners, and possession when observed.
@@ -404,38 +421,47 @@ def compute_posterior_intensities(
             live_rate_h *= 1.0 + 0.08 * poss_diff
             live_rate_a *= 1.0 - 0.08 * poss_diff
 
-        # If SOT wasn't captured, anchor live_rate closer to base
+        # Sparse stats (e.g. corners-only, no shots on target) get half weight.
+        w_stat = minutes_played / (minutes_played + shrinkage_tau_minutes)
         if state.home.shots_on_target is None or state.away.shots_on_target is None:
-            w_stat = 0.20 * (minutes_played / (minutes_played + shrinkage_tau_minutes))
-        else:
-            w_stat = minutes_played / (minutes_played + shrinkage_tau_minutes)
+            w_stat *= 0.5
 
-        post_h = (1.0 - w_stat) * base_h + w_stat * max(0.30, min(3.80, live_rate_h))
-        post_a = (1.0 - w_stat) * base_a + w_stat * max(0.25, min(3.80, live_rate_a))
+        post_h = (1.0 - w_stat) * base_h + w_stat * max(0.10, min(3.80, live_rate_h))
+        post_a = (1.0 - w_stat) * base_a + w_stat * max(0.10, min(3.80, live_rate_a))
     else:
         w_stat = 0.0
         post_h, post_a = base_h, base_a
 
-    # Markov Red-Card Manpower Multipliers
+    # Markov Red-Card Manpower Multipliers (decayed by remaining playing time)
     h_reds = state.home_reds
     a_reds = state.away_reds
     if h_reds == 0 and a_reds == 0:
-        rc_h, rc_a = 1.0, 1.0
+        rc_h_full, rc_a_full = 1.0, 1.0
     elif h_reds > 0 and a_reds == 0:
-        rc_h = 0.68 ** h_reds
-        rc_a = 1.32 ** min(h_reds, 2)
+        rc_h_full = 0.68 ** h_reds
+        rc_a_full = 1.32 ** min(h_reds, 2)
     elif a_reds > 0 and h_reds == 0:
-        rc_h = 1.32 ** min(a_reds, 2)
-        rc_a = 0.68 ** a_reds
+        rc_h_full = 1.32 ** min(a_reds, 2)
+        rc_a_full = 0.68 ** a_reds
     else:
         # Both teams have dismissals (e.g. 10v10 opens pitch space +8%, plus net diff)
         net_adv = a_reds - h_reds
-        rc_h = 1.08 * (1.28 ** max(0, net_adv)) * (0.72 ** max(0, -net_adv))
-        rc_a = 1.08 * (1.28 ** max(0, -net_adv)) * (0.72 ** max(0, net_adv))
+        rc_h_full = 1.08 * (1.28 ** max(0, net_adv)) * (0.72 ** max(0, -net_adv))
+        rc_a_full = 1.08 * (1.28 ** max(0, -net_adv)) * (0.72 ** max(0, net_adv))
+
+    # Interpolate between no effect (1.0) and the full multiplier as time runs out.
+    decay = min(1.0, remaining_minutes / 30.0)
+    rc_h = 1.0 + decay * (rc_h_full - 1.0)
+    rc_a = 1.0 + decay * (rc_a_full - 1.0)
 
     # Score-State Tempo Multipliers (late 2nd half trailing urgency vs leading conservatism)
     ss_h, ss_a = 1.0, 1.0
-    if state.home.goals is not None and state.away.goals is not None and clock >= 60.0:
+    if (
+        state.home.goals is not None
+        and state.away.goals is not None
+        and clock >= 60.0
+        and remaining_minutes >= 10.0
+    ):
         diff = state.home.goals - state.away.goals
         if diff == -1:
             ss_h, ss_a = 1.12, 1.05
@@ -496,7 +522,7 @@ def build_remaining_score_matrix(
     mu_away: float,
     rho: float = -0.06,
     shared_tempo_frac: float = 0.05,
-    max_goals: int = 8,
+    max_goals: int = 10,
 ) -> list[list[float]]:
     """Build exact (max_goals+1) x (max_goals+1) joint probability matrix P(Delta G_H = i, Delta G_A = j).
 
@@ -666,7 +692,11 @@ def price_from_joint_matrix(
         return p_h, p_d, p_a
 
     # 1. 1X2 Family (Full Time, 1st Half, 2nd Half, Rest of Match)
-    if mkey in ("1x2", "1x2_1h", "1x2_2h", "rest_of_match", "rest_of_match_1x2"):
+    if mkey in (
+        "1x2", "1x2_1h", "1x2_2h",
+        "rest_of_match", "rest_of_match_1x2", "1x2_rest",
+        "1x2_never_down",
+    ):
         scope = (
             "1h"
             if mkey == "1x2_1h"
