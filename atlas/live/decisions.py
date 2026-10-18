@@ -65,7 +65,11 @@ def compute_recommended_stake_ngn(
     )
     if f_star <= 0.0:
         return 0.0
-    raw_ngn = math.floor(policy.bankroll_ngn * f_star)
+    # Quantise the fraction before flooring to the Naira. Kelly arithmetic is
+    # float-noisy (e.g. p=0.6,o=2.0 yields edge=0.19999999999999996), so an
+    # unguarded floor silently under-stakes by a full unit on exact edges.
+    f_star = round(f_star, 6)
+    raw_ngn = math.floor(policy.bankroll_ngn * f_star + 1e-9)
     remaining_exp = max(0.0, policy.max_exposure_per_match - current_match_exposure)
     max_by_payout = policy.max_payout_per_bet / max(1.0, odds)
     capped = min(

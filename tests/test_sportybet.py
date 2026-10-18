@@ -85,6 +85,13 @@ def test_breakeven_and_ev_math():
 
 
 def test_correlation_guard_blocks_stacked_home_goals_bets():
+    """Same-factor stacking must be blocked; unrelated families must survive.
+
+    Under the 8-factor taxonomy, 1X2/Home (home_goals), Over 2.5 (total_goals)
+    and Home corners (home_corners) are distinct families, so with a cap of 1
+    each may be taken once. BTTS spans home_goals + total_goals and is the bet
+    that must lose to whichever of those fills its cap first.
+    """
     opps = [
         Opportunity(MATCH_ID, "1x2_home", "Home", 1.61, 0.70, "live_v1"),
         Opportunity(MATCH_ID, "ou_2_5_over", "Over 2.5", 2.10, 0.55, "live_v1"),
@@ -94,7 +101,10 @@ def test_correlation_guard_blocks_stacked_home_goals_bets():
     accepted, rejected = rank_and_filter(opps, LoopConfig(min_ev=0.05))
     keys = [o.market_key for o in accepted]
     assert "home_corners_5_5_over" in keys  # uncorrelated angle survives
-    assert len([k for k in keys if k in {"1x2_home", "ou_2_5_over", "btts_yes"}]) <= 1
+    # BTTS shares both home_goals and total_goals, so it is the one that must
+    # be blocked once either of those factors is taken.
+    assert "btts_yes" not in keys
+    assert len(keys) == 3
     assert any("correlated" in r["reason"] for r in rejected)
 
 

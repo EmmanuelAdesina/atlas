@@ -30,9 +30,11 @@ from atlas.live.math_engine import (
 # Markets whose outcomes move together. Individual EVs in the same group
 # must NOT be treated as independent opportunities.
 CORRELATED_GROUPS: dict[str, set[str]] = {
+    # NOTE: total-goals keys (e.g. "ou_2_5_over") belong ONLY in total_goals.
+    # Filing them under home_goals made a market-wide O/U bet consume the
+    # home-goals cap and wrongly blocked legitimate home-goals bets.
     "home_goals": {
         "1x2_home",
-        "ou_2_5_over",
         "btts_yes",
         "home_over_1_5",
         "home_2nd_half_over",
@@ -45,11 +47,20 @@ CORRELATED_GROUPS: dict[str, set[str]] = {
 
 def selection_correlation_groups(market_key: str, selection: str = "") -> list[str]:
     """Map both legacy shorthand keys and canonical (market_key, selection) pairs to risk factors."""
-    groups: set[str] = {
-        g for g, keys in CORRELATED_GROUPS.items() if market_key in keys
-    }
-    mkey = market_key.strip().lower()
     sel = selection.strip().lower()
+    groups: set[str] = set()
+    for g, keys in CORRELATED_GROUPS.items():
+        for key in keys:
+            if market_key != key:
+                continue
+            # Legacy shorthands encode direction ("ou_2_5_over"). Honour it, or
+            # an Under bet inherits the Over factor and both caps get polluted.
+            if key.endswith("_over") and not sel.startswith("over"):
+                continue
+            if key.endswith("_under") and not sel.startswith("under"):
+                continue
+            groups.add(g)
+    mkey = market_key.strip().lower()
 
     # Canonical SportyBet factor mapping
     if mkey in ("1x2", "1x2_1h", "1x2_2h", "rest_of_match", "rest_of_match_1x2", "dnb", "draw_no_bet"):
