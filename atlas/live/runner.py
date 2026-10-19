@@ -91,6 +91,7 @@ class LiveRunner:
         ledger: BetLedger,
         notifier: Optional[Notifier] = None,
         betslip: Any = None,
+        cashout_driver: Any = None,
         posture: Optional[Posture] = None,
         cycle_s: float = 30.0,
         model: Any = None,
@@ -101,6 +102,7 @@ class LiveRunner:
         self.ledger = ledger
         self.notifier = notifier
         self.betslip = betslip
+        self.cashout_driver = cashout_driver
         self.posture = posture or posture_for_mode("balanced")
         self.cycle_s = cycle_s
         self.model = model or LiveStateSpaceModel(now=datetime.now(timezone.utc))
@@ -146,6 +148,7 @@ class LiveRunner:
                 max_exposure_per_match=float(raw.get("max_exposure_per_match", 3000.0)),
                 max_bets_per_snapshot=int(raw.get("max_bets_per_snapshot", 2)),
                 max_stake_per_bet=float(raw.get("max_stake_per_bet", 1000.0)),
+                cashout_min_discount=float(raw.get("cashout_min_discount", 0.0)),
                 require_guaranteed_profit=bool(raw.get("require_guaranteed_profit", False)),
                 rationale=str(raw.get("rationale", "restored")),
                 source=str(raw.get("source", "restored")),
@@ -506,15 +509,21 @@ class LiveRunner:
     # --- cashout ---------------------------------------------------------
 
     def evaluate_cashouts(
-        self, cashout_offers: dict[str, float]
+        self, cashout_offers: dict[str, float],
+        min_discount: float = 0.0,
     ) -> list[dict]:
-        """Value any cashout offers against the open positions."""
+        """Value any cashout offers against the open positions.
+
+        `cashout_offers` maps a bet id to the amount the book is offering.
+        """
         out: list[dict] = []
+        open_bets = {
+            b.get("bet_id"): b
+            for b in self.ledger.all_bets()
+            if b.get("status") not in ("won", "lost", "void")
+        }
         for bet_id, offered in (cashout_offers or {}).items():
-            match = next(
-                (b for b in self.ledger.bets_for("*") if b.get("bet_id") == bet_id),
-                None,
-            )
+            match = open_bets.get(bet_id)
             if match is None:
                 continue
             position = Position(
@@ -526,7 +535,7 @@ class LiveRunner:
                 odds=float(match.get("odds", 0.0)),
                 model_p=float(match.get("model_p", 0.0)),
             )
-            valuation = value_cashout(position, offered)
+            valuation = value_cashout(position, offered, min_discount=min_discount)
             out.append(
                 {
                     "bet_id": bet_id,
@@ -537,3 +546,60 @@ class LiveRunner:
                 }
             )
         return out
+
+    def handle_cashout_offers(self) -> list[dict]:
+        """Read the book's cashout offers, value them, and act on the good ones.
+
+        A cashout is only taken when it beats the position's model value by
+        the posture's required margin, so selling a good bet cheaply never
+        happens by default.
+        """
+        if self.cashout_driver is None:
+            return []
+        try:
+            offers = self.cashout_driver.read_offers()
+        except Exception:
+            return []
+        if not offers:
+            return []
+        by_stake = {round(o.stake_ngn, 2): o for o in offers}
+        priced: dict[str, float] = {}
+        open_bets = self.ledger.open_bets()
+        # A cashout offer is matched to a position by stake. That is only
+        # safe when the stake is UNIQUE among the open bets: with two open
+        # bets of the same stake there is no way to tell which position the
+        # book is offering to buy back, and guessing would sell the wrong
+        # position.
+        stake_counts: dict[float, int] = {}
+        for bet in open_bets:
+            stake = round(float(bet.get("stake_ngn", 0.0)), 2)
+            stake_counts[stake] = stake_counts.get(stake, 0) + 1
+        for bet in open_bets:
+            stake = round(float(bet.get("stake_ngn", 0.0)), 2)
+            if stake_counts.get(stake, 0) != 1:
+                continue
+            offer = by_stake.get(stake)
+            if offer is not None:
+                priced[bet.get("bet_id", "")] = offer.offered_ngn
+        valuations = self.evaluate_cashouts(
+            priced, min_discount=self.posture.cashout_min_discount
+        )
+        by_bet_id = {b.get("bet_id", ""): b for b in open_bets}
+        for v in valuations:
+            if not v["recommended"]:
+                continue
+            if self.notifier is not None:
+                self.notifier.info(
+                    "Cashout taken",
+                    f"NGN {v['offered_ngn']:.2f} for bet {v['bet_id']}",
+                    **v,
+                )
+            if self.cashout_driver.allow_execute:
+                bet = by_bet_id.get(v["bet_id"])
+                stake = (
+                    round(float(bet.get("stake_ngn", 0.0)), 2) if bet else None
+                )
+                offer = by_stake.get(stake) if stake is not None else None
+                if offer is not None:
+                    self.cashout_driver.execute(offer.index)
+        return valuations

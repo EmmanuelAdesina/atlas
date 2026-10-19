@@ -199,6 +199,20 @@ class BetLedger:
                 b.to_dict() for b in self._bets.values() if b.match_id == match_id
             ]
 
+    def all_bets(self) -> list[dict]:
+        """Every bet in the ledger, whatever the match."""
+        with self._lock:
+            return [b.to_dict() for b in self._bets.values()]
+
+    def open_bets(self) -> list[dict]:
+        """Every bet that is still live (not won, lost or void)."""
+        with self._lock:
+            return [
+                b.to_dict()
+                for b in self._bets.values()
+                if b.status not in SETTLED_STATUSES
+            ]
+
     def record_pending(self, bet: dict) -> bool:
         """Record a dict-shaped bet (Boss API). Respects the hard daily stop."""
         rec = BetRecord(

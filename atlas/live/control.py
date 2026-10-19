@@ -63,10 +63,9 @@ def build_app(runner: LiveRunner, notifier: Optional[Notifier] = None) -> FastAP
             "daily_stop_active": ledger.is_daily_stop_active(),
             "open_exposure_ngn": sum(
                 b.get("stake_ngn", 0.0)
-                for b in ledger.bets_for("*")
-                if b.get("status") not in ("won", "lost", "void")
+                for b in ledger.open_bets()
             ),
-            "bets": len(ledger.bets_for("*")),
+            "bets": len(ledger.all_bets()),
             "submission_enabled": runner.allow_submission,
             "last_cycle": asdict(last) if last is not None else None,
             "last_error": runner.last_error,

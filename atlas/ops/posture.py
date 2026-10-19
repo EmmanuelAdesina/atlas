@@ -52,6 +52,10 @@ HARD_BOUNDS = {
     "max_exposure_per_match": (500.0, 20_000.0),
     "max_bets_per_snapshot": (1, 10),
     "max_stake_per_bet": (100.0, 10_000.0),
+    # How much BETTER than the model value a cashout offer must be before it
+    # is taken. Negative means a risk-seeking posture accepts a discounted
+    # floor; positive means it demands a premium to sell.
+    "cashout_min_discount": (-0.50, 1.00),
 }
 
 # The default posture: what ATLAS runs with when nobody has said otherwise.
@@ -64,6 +68,7 @@ _MODE_PRESETS: dict[PostureMode, dict[str, float]] = {
         "max_exposure_per_match": 1_500.0,
         "max_bets_per_snapshot": 1,
         "max_stake_per_bet": 500.0,
+        "cashout_min_discount": 0.05,
     },
     PostureMode.BALANCED: {
         "min_ev": 0.05,
@@ -71,6 +76,7 @@ _MODE_PRESETS: dict[PostureMode, dict[str, float]] = {
         "max_exposure_per_match": 3_000.0,
         "max_bets_per_snapshot": 2,
         "max_stake_per_bet": 1_000.0,
+        "cashout_min_discount": 0.0,
     },
     PostureMode.AGGRESSIVE: {
         "min_ev": 0.02,
@@ -78,6 +84,7 @@ _MODE_PRESETS: dict[PostureMode, dict[str, float]] = {
         "max_exposure_per_match": 8_000.0,
         "max_bets_per_snapshot": 4,
         "max_stake_per_bet": 3_000.0,
+        "cashout_min_discount": -0.10,
     },
     PostureMode.SUPEREDGE_ONLY: {
         "min_ev": 0.02,
@@ -85,6 +92,7 @@ _MODE_PRESETS: dict[PostureMode, dict[str, float]] = {
         "max_exposure_per_match": 2_000.0,
         "max_bets_per_snapshot": 1,
         "max_stake_per_bet": 2_000.0,
+        "cashout_min_discount": 0.0,
     },
 }
 
@@ -99,6 +107,7 @@ class Posture:
     max_exposure_per_match: float = 3_000.0
     max_bets_per_snapshot: int = 2
     max_stake_per_bet: float = 1_000.0
+    cashout_min_discount: float = 0.0
     require_guaranteed_profit: bool = False
     rationale: str = "default posture"
     source: str = "default"
@@ -134,6 +143,7 @@ class Posture:
             "max_exposure_per_match": self.max_exposure_per_match,
             "max_bets_per_snapshot": self.max_bets_per_snapshot,
             "max_stake_per_bet": self.max_stake_per_bet,
+            "cashout_min_discount": self.cashout_min_discount,
             "require_guaranteed_profit": self.require_guaranteed_profit,
             "rationale": self.rationale,
             "source": self.source,
@@ -145,7 +155,8 @@ class Posture:
             f"{self.mode.value}: min_ev {self.min_ev:.3f}, kelly "
             f"{self.kelly_fraction:.2f}, exposure cap NGN "
             f"{self.max_exposure_per_match:.0f}, "
-            f"{self.max_bets_per_snapshot} bet(s)/snapshot"
+            f"{self.max_bets_per_snapshot} bet(s)/snapshot, "
+            f"cashout needs {self.cashout_min_discount:+.0%} over model"
             + (
                 ", superedge-only"
                 if self.require_guaranteed_profit
@@ -340,6 +351,9 @@ class LLMProposer:
             ),
             max_bets_per_snapshot=int(data.get("max_bets_per_snapshot", 2) or 2),
             max_stake_per_bet=float(data.get("max_stake_per_bet", 1000.0) or 1000.0),
+            cashout_min_discount=float(
+                data.get("cashout_min_discount", 0.0) or 0.0
+            ),
             require_guaranteed_profit=bool(data.get("require_guaranteed_profit", False)),
             rationale=str(data.get("rationale", "proposed by model"))[:400],
             source="llm",

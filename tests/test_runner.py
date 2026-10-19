@@ -343,3 +343,121 @@ def test_no_live_candidates_means_no_choice():
 
     assert LiveRunner.choose_match([]) is None
     assert LiveRunner.choose_match([_cand(period="FT")]) is None
+
+
+# --- cashout handling ----------------------------------------------------
+
+class FakeCashoutDriver:
+    def __init__(self, offers=None, allow_execute=False):
+        from atlas.browser.cashout import CashoutOffer
+
+        self.offers = offers or []
+        self.allow_execute = allow_execute
+        self.executed = []
+
+    def read_offers(self):
+        return self.offers
+
+    def execute(self, index):
+        self.executed.append(index)
+        return {"ok": True}
+
+
+def test_cashout_offer_is_valued_against_the_open_position(ledger):
+    from atlas.browser.cashout import CashoutOffer
+
+    ledger.record_pending(
+        {
+            "match_id": "m1",
+            "market_key": "1x2",
+            "selection": "Home",
+            "odds": 2.0,
+            "stake_ngn": 100.0,
+            "model_p": 0.5,
+            "p_lower": 0.45,
+            "ev": 0.0,
+            "confidence": "unknown",
+        }
+    )
+    offer = CashoutOffer(index=0, stake_ngn=100.0, offered_ngn=130.0)
+    driver = FakeCashoutDriver([offer])
+    runner = make_runner(ledger, FakeCapture(), cashout_driver=driver)
+    vals = runner.handle_cashout_offers()
+    assert len(vals) == 1
+    # The model value is 100, so 130 beats it: take the cashout.
+    assert vals[0]["recommended"] is True
+    assert vals[0]["discount"] == pytest.approx(0.30)
+
+
+def test_a_cheap_cashout_is_refused(ledger):
+    from atlas.browser.cashout import CashoutOffer
+
+    ledger.record_pending(
+        {
+            "match_id": "m1",
+            "market_key": "1x2",
+            "selection": "Home",
+            "odds": 2.0,
+            "stake_ngn": 100.0,
+            "model_p": 0.5,
+            "p_lower": 0.45,
+            "ev": 0.0,
+            "confidence": "unknown",
+        }
+    )
+    offer = CashoutOffer(index=0, stake_ngn=100.0, offered_ngn=70.0)
+    driver = FakeCashoutDriver([offer])
+    runner = make_runner(ledger, FakeCapture(), cashout_driver=driver)
+    vals = runner.handle_cashout_offers()
+    assert vals[0]["recommended"] is False
+    assert driver.executed == []
+
+
+def test_cashout_execution_needs_the_explicit_opt_in(ledger):
+    from atlas.browser.cashout import CashoutOffer
+
+    ledger.record_pending(
+        {
+            "match_id": "m1",
+            "market_key": "1x2",
+            "selection": "Home",
+            "odds": 2.0,
+            "stake_ngn": 100.0,
+            "model_p": 0.5,
+            "p_lower": 0.45,
+            "ev": 0.0,
+            "confidence": "unknown",
+        }
+    )
+    offer = CashoutOffer(index=0, stake_ngn=100.0, offered_ngn=130.0)
+    driver = FakeCashoutDriver([offer], allow_execute=False)
+    runner = make_runner(ledger, FakeCapture(), cashout_driver=driver)
+    runner.handle_cashout_offers()
+    assert driver.executed == []
+
+
+def test_an_ambiguous_cashout_offer_is_not_acted_on(ledger):
+    """Two open bets of the same stake: the offer cannot be attributed, so
+    the loop must not act on it."""
+    from atlas.browser.cashout import CashoutOffer
+
+    for sel in ("Home", "Away"):
+        ledger.record_pending(
+            {
+                "match_id": "m1",
+                "market_key": "1x2",
+                "selection": sel,
+                "odds": 2.0,
+                "stake_ngn": 100.0,
+                "model_p": 0.5,
+                "p_lower": 0.45,
+                "ev": 0.0,
+                "confidence": "unknown",
+            }
+        )
+    offer = CashoutOffer(index=0, stake_ngn=100.0, offered_ngn=130.0)
+    driver = FakeCashoutDriver([offer])
+    runner = make_runner(ledger, FakeCapture(), cashout_driver=driver)
+    vals = runner.handle_cashout_offers()
+    assert vals == []
+    assert driver.executed == []
