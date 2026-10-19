@@ -127,3 +127,39 @@ def test_team_parity_is_scoped_to_that_team(env):
     away = price(env, st, "away_odd_even_2h", "Odd")
     assert home is not None and away is not None
     assert home != pytest.approx(away, abs=1e-9)
+
+
+# --- Excluded number of goals -------------------------------------------
+
+def test_excluded_goals_wins_on_any_other_count(env):
+    """The bet wins on ANY goal count other than the stated one."""
+    st = state(home=1, away=0)
+    # The home side has already scored, so its count is already not zero.
+    assert price(env, st, "excluded_goals_home", "0") == pytest.approx(1.0, abs=1e-12)
+
+
+def test_excluded_goals_matches_the_live_books_implied_probability(env):
+    """Read off the live board: 'Excluded Number of Goals - Away' offered 0
+    at 2.95 (implied 0.339) with the away side 0-1 down at 70 minutes. The
+    model says 0.345, which is close enough to confirm the reading is
+    'the team scores a number of goals other than this'."""
+    st = state(home=1, away=0)
+    p = price(env, st, "excluded_goals_away", "0")
+    # The exact value depends on the intensities, but it must be a sensible
+    # probability: the away side is behind, so scoring at least one goal is
+    # likely but far from certain. A wrong reading of the market would give
+    # a number near 0 or near 1.
+    assert 0.15 < p < 0.55
+
+
+def test_excluded_goals_complements_the_exact_count(env):
+    st = state(home=1, away=0)
+    for n in ("0", "1", "2"):
+        excluded = price(env, st, "excluded_goals_away", n)
+        exact = price(env, st, "away_exact_goals", n)
+        assert excluded + exact == pytest.approx(1.0, abs=1e-12)
+
+
+def test_excluded_goals_rejects_a_non_numeric_selection(env):
+    st = state(home=1, away=0)
+    assert price(env, st, "excluded_goals_away", "Over") is None

@@ -167,6 +167,11 @@ _HEADER_PATTERNS: list[tuple[re.Pattern, Any]] = [
     (re.compile(r"^Asian Handicap Corners$"), ("corners_ah_pending", None, "full")),
     (re.compile(r"^Handicap Corners$"), ("corners_ah_pending", None, "full")),
     (re.compile(r"^Corners$"), ("corners_ou_pending", None, "full")),
+    # --- Excluded number of goals: the bet wins on any OTHER goal count ---
+    (re.compile(r"^Excluded Number of Goals - Home$"),
+     ("excluded_goals_home", None, "full")),
+    (re.compile(r"^Excluded Number of Goals - Away$"),
+     ("excluded_goals_away", None, "full")),
 ]
 
 _OU_SELECTION_RE = re.compile(r"^(Over|Under)\s+(\d+(?:\.\d+)?)$")
@@ -292,14 +297,22 @@ def extract_markets(texts: list[str], match_id: str) -> list[dict]:
     region = [t.strip() for t in texts[start:end] if t.strip() and not _GLYPH_RE.match(t)]
 
     # The viewed match's team names, needed to identify team-specific markets
-    # such as 'Beitar Jerusalem FC Over/Under'.
+    # such as 'Beitar Jerusalem FC Over/Under'. The match header sits ABOVE
+    # the market-tabs row, so it has to be read from the whole snapshot, not
+    # from the market region.
     home_team = ""
     away_team = ""
-    for t in region:
+    for t in texts:
         if " vs " in t and len(t) < 80:
             parts = t.split(" vs ", 1)
             home_team, away_team = parts[0].strip(), parts[1].strip()
             break
+    if not home_team:
+        for t in region:
+            if " vs " in t and len(t) < 80:
+                parts = t.split(" vs ", 1)
+                home_team, away_team = parts[0].strip(), parts[1].strip()
+                break
 
     markets: list[dict] = []
     current: Optional[dict] = None

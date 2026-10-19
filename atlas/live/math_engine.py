@@ -1474,7 +1474,27 @@ def price_from_joint_matrix(
                     p_win += cell_p
             return SelectionProbabilityOutcome(p_win=p_win)
 
-    # 19. Combination markets ('combo_1x2__ou_1_5', 'combo_ou_2_5__btts', ...)
+    # 19. Excluded number of goals ('excluded_goals_home', 'excluded_goals_away')
+    #     The selection is a number, and the bet wins on ANY OTHER goal count.
+    #     Read off the live board: 'Excluded Number of Goals - Away' offered
+    #     0 at 2.95, 1 at 1.24 and 2 at 1.01, whose implied probabilities
+    #     sum to 2.1 — so the three are overlapping bets, not a partition.
+    #     Each one is "the team scores a number of goals other than this".
+    if mkey in ("excluded_goals_home", "excluded_goals_away"):
+        is_home = mkey.endswith("home")
+        pmf = marg.home_pmf if is_home else marg.away_pmf
+        base_g = cur_h if is_home else cur_a
+        want = sel.strip()
+        if not want.isdigit():
+            return None
+        excluded = int(want)
+        p_exact = 0.0
+        for k, cell_p in enumerate(pmf):
+            if base_g + k == excluded:
+                p_exact += cell_p
+        return SelectionProbabilityOutcome(p_win=1.0 - p_exact)
+
+    # 20. Combination markets ('combo_1x2__ou_1_5', 'combo_ou_2_5__btts', ...)
     # A combination such as '1X2 & Over/Under 1.5' settles on the JOINT
     # outcome, so its probability is NOT the product of the two marginals.
     # It is read straight off the joint matrix, which is exactly where a
