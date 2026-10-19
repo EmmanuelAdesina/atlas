@@ -415,6 +415,34 @@ def cmd_plan(args: argparse.Namespace) -> int:
         f"{blocked} abstained/blocked)"
     )
 
+    # Sure-thing scan: a covering set whose inverse prices sum below one is a
+    # guaranteed profit, independent of how the match ends.
+    from atlas.live.arb import Selection, best_arbs
+
+    arb_selections = [
+        Selection(
+            market_key=o.market_key,
+            selection=o.selection,
+            odds=o.odds,
+            model_p=o.model_p,
+        )
+        for o in opportunities
+    ]
+    arbs = best_arbs(arb_selections, min_edge=args.min_arb_edge)
+    if arbs:
+        console.print(
+            f"[bold green]SURE-THING ARBS:[/bold green] {len(arbs)} covering set(s) "
+            f"profit regardless of the result"
+        )
+        for arb in arbs[:8]:
+            console.print(f"  {arb.describe()}")
+            for name, stake, payout in arb.stakes():
+                console.print(
+                    f"      {name}: stake {stake:.4f} -> pays {payout:.4f} if it lands"
+                )
+    else:
+        console.print("[dim]No sure-thing arb on this board.[/dim]")
+
     match_state = {
         "period": state.period,
         "clock_minute": state.clock_minute,
@@ -533,6 +561,12 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--fixture", required=True, help="Recorded observation JSON")
     plan.add_argument("--ledger", default="data/ops/ledger.jsonl", help="Ledger JSONL path")
     plan.add_argument("--min-ev", type=float, default=0.05, help="EV floor")
+    plan.add_argument(
+        "--min-arb-edge",
+        type=float,
+        default=0.005,
+        help="Minimum sure-thing arb edge over the implied margin (default: 0.005)",
+    )
     plan.add_argument(
         "--daily-loss-limit",
         type=float,
