@@ -59,6 +59,12 @@ REPRESENTATIVE_SELECTION = {
     "home_exact_goals": "1",
     "away_exact_goals": "1",
     "correct_score": "2:2",
+    "combo_1x2__ou_1_5": "Home & Over",
+    "combo_1x2__ou_2_5": "Home & Over",
+    "combo_1x2__btts": "Home & Yes",
+    "combo_ou_2_5__btts": "Over & Yes",
+    "combo_double_chance__ou_1_5": "Home or Draw & Over",
+    "combo_double_chance__btts": "Home or Draw & Yes",
 }
 
 
@@ -90,6 +96,17 @@ def _representative(key: str | None):
         return f"Home ({parts[1]}:{parts[2]})"
     if key.startswith("lead_by_") or key.startswith("goals_in_row_"):
         return "Yes"
+    if key.startswith("combo_"):
+        comp_a, comp_b = key[len("combo_"):].split("__")
+        first = {
+            "1x2": "Home", "double_chance": "Home or Draw", "2h_double_chance": "Home or Draw",
+        }.get(comp_a)
+        if first is None and comp_a.startswith("ou_"):
+            first = "Over"
+        second = "Yes" if comp_b == "btts" else ("Over" if comp_b.startswith("ou_") else None)
+        if first and second:
+            return f"{first} & {second}"
+        return None
     return None
 
 
@@ -142,7 +159,7 @@ def test_pricer_covers_most_of_a_live_board(board, pricing_env):
             priced_odds += n
 
     coverage = priced_odds / total_odds
-    assert coverage >= 0.60, (
+    assert coverage >= 0.65, (
         f"live-board coverage fell to {coverage:.1%} "
         f"({priced_odds}/{total_odds} odds) — the pricer lost reach"
     )

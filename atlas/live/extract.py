@@ -119,6 +119,17 @@ _HEADER_PATTERNS: list[tuple[re.Pattern, Any]] = [
     (re.compile(r"^2nd Half Home Team to Win to Nil$"), ("home_win_to_nil", None, "2h")),
     (re.compile(r"^2nd Half Away Team to Win to Nil$"), ("away_win_to_nil", None, "2h")),
     (re.compile(r"^2nd Half - Correct Score$"), ("correct_score", None, "2h")),
+    # --- Combination markets (joint outcomes, priced off the joint matrix) ---
+    (re.compile(r"^1X2 & Over/Under (\d+(?:\.\d+)?)$"), ("combo_1x2__ou_{line}", None, "full")),
+    (re.compile(r"^1X2 & GG/NG$"), ("combo_1x2__btts", None, "full")),
+    (re.compile(r"^Over/Under (\d+(?:\.\d+)?) & GG/NG$"), ("combo_ou_{line}__btts", None, "full")),
+    (re.compile(r"^Over/Under & GG/NG$"), ("combo_ou_2_5__btts", None, "full")),
+    (re.compile(r"^Double Chance & Total Goals$"), ("combo_double_chance__ou_1_5", None, "full")),
+    (re.compile(r"^Double Chance & GG/NG$"), ("combo_double_chance__btts", None, "full")),
+    (re.compile(r"^2nd Half - Double Chance & Total Goals$"), ("combo_2h_double_chance__ou_1_5", None, "2h")),
+    (re.compile(r"^2nd Half - Double Chance & GG/NG$"), ("combo_2h_double_chance__btts", None, "2h")),
+    (re.compile(r"^2nd Half - 1X2 Over/Under (\d+(?:\.\d+)?)$"), ("combo_1x2_2h__ou_{line}", None, "2h")),
+    (re.compile(r"^2nd Half - 1X2 GG/NG$"), ("combo_1x2_2h__btts", None, "2h")),
 ]
 
 _OU_SELECTION_RE = re.compile(r"^(Over|Under)\s+(\d+(?:\.\d+)?)$")
@@ -181,6 +192,10 @@ def _match_header(label: str) -> Optional[tuple[Optional[str], Optional[float], 
             if key and "{n}" in key:
                 # 'Any Team to lead by 2 Goals at any time' -> lead_by_2_any
                 key = key.format(n=m.group(1))
+            if key and "{line}" in key:
+                # '1X2 & Over/Under 1.5' -> combo_1x2__ou_1_5
+                line_txt = m.group(1).replace(".", "_")
+                key = key.format(line=line_txt)
             return (key, line, period)
     return None
 

@@ -1148,7 +1148,114 @@ def price_from_joint_matrix(
             return None
         return SelectionProbabilityOutcome(p_win=mat[rem_h][rem_a])
 
+    # 15. Combination markets ('combo_1x2__ou_1_5', 'combo_ou_2_5__btts', ...)
+    # A combination such as '1X2 & Over/Under 1.5' settles on the JOINT
+    # outcome, so its probability is NOT the product of the two marginals.
+    # It is read straight off the joint matrix, which is exactly where a
+    # joint-distribution model beats a naive one.
+    combo_m = _COMBO_KEY_RE.match(mkey)
+    if combo_m:
+        comp_a, comp_b = combo_m.group(1), combo_m.group(2)
+        parts = [p.strip() for p in re.split(r"\s*&\s*|\s+and\s+", sel.strip())]
+        if len(parts) != 2:
+            return None
+        spec_a = _combo_component(comp_a, parts[0])
+        spec_b = _combo_component(comp_b, parts[1])
+        if spec_a is None or spec_b is None:
+            return None
+        base = period_base_scores("full")
+        if base is None:
+            return None
+        bh, ba = base
+        n_rows = len(mat)
+        p_win = 0.0
+        for i in range(n_rows):
+            row = mat[i]
+            for j in range(len(row)):
+                cell = row[j]
+                if cell <= 0.0:
+                    continue
+                if _combo_holds(spec_a, bh + i, ba + j) and _combo_holds(
+                    spec_b, bh + i, ba + j
+                ):
+                    p_win += cell
+        return SelectionProbabilityOutcome(p_win=p_win)
+
     return None
+
+
+# ---------------------------------------------------------------------------
+# Combination-market helpers
+# ---------------------------------------------------------------------------
+
+_COMBO_KEY_RE = re.compile(r"^combo_([a-z0-9_.]+)__([a-z0-9_.]+)$")
+_OU_LINE_RE = re.compile(r"^ou_(\d+(?:_\d+)?)$")
+
+
+def _combo_component(component: str, part: str) -> Optional[tuple[str, object]]:
+    """Map one side of a combination market to (kind, value).
+
+    Returns None when the selection text does not match the component, so an
+    unfamiliar label abstains rather than mispricing.
+    """
+    c = component.lower()
+    p = part.strip().lower()
+    if c in ("1x2", "1x2_1h", "1x2_2h", "rest_of_match_1x2"):
+        if p in ("home", "1"):
+            return ("1x2", "home")
+        if p in ("draw", "x"):
+            return ("1x2", "draw")
+        if p in ("away", "2"):
+            return ("1x2", "away")
+        return None
+    if c in ("double_chance", "1h_double_chance", "2h_double_chance"):
+        if p in ("home or draw", "home/draw", "1x"):
+            return ("dc", "home_or_draw")
+        if p in ("draw or away", "draw/away", "x2"):
+            return ("dc", "draw_or_away")
+        if p in ("home or away", "home/away", "12"):
+            return ("dc", "home_or_away")
+        return None
+    if c in ("btts", "gg_ng", "1h_btts", "2h_btts"):
+        if p in ("yes", "gg"):
+            return ("btts", True)
+        if p in ("no", "ng"):
+            return ("btts", False)
+        return None
+    m = _OU_LINE_RE.match(c)
+    if m:
+        line = float(m.group(1).replace("_", "."))
+        if p.startswith("over"):
+            return ("ou", ("over", line))
+        if p.startswith("under"):
+            return ("ou", ("under", line))
+        return None
+    return None
+
+
+def _combo_holds(spec: tuple[str, object], final_h: int, final_a: int) -> bool:
+    """Does the final score satisfy this component?"""
+    kind, value = spec
+    diff = final_h - final_a
+    if kind == "1x2":
+        if value == "home":
+            return diff > 0
+        if value == "draw":
+            return diff == 0
+        return diff < 0
+    if kind == "dc":
+        if value == "home_or_draw":
+            return diff >= 0
+        if value == "draw_or_away":
+            return diff <= 0
+        return diff != 0
+    if kind == "btts":
+        return bool(value) == (final_h > 0 and final_a > 0)
+    if kind == "ou":
+        side, line = value  # type: ignore[misc]
+        total = final_h + final_a
+        return total > line if side == "over" else total < line
+    return False
 
 
 # ---------------------------------------------------------------------------
