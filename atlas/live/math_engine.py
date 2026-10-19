@@ -28,6 +28,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from atlas.live.observe import LiveMatchState
+from atlas.live.paths import (
+    GoalPathModel,
+    abs_lead_by_prob,
+    goals_in_row_prob,
+    lead_by_prob,
+)
 
 # Piecewise 15-minute relative goal-scoring hazard rates in regulation time,
 # calibrated to European professional football (1H share = 45%, 2H share = 55%,
@@ -627,6 +633,13 @@ class SelectionProbabilityOutcome:
 _HANDICAP_KEY_RE = re.compile(r"^handicap_(\d+)_(\d+)$")
 _AH_KEY_RE = re.compile(r"^(?:ah|asian_handicap)_([+-]?\d+(?:[._]\d+)?)$")
 _OU_KEY_RE = re.compile(r"^(ou|ou_1h|ou_2h|home_ou|away_ou)_(\d+(?:_\d+)?)$")
+# Path-based families: 'lead_by_2_any' | 'lead_by_1_home' | 'goals_in_row_3_away'
+_PATH_KEY_RE = re.compile(r"^(lead_by|goals_in_row)_(\d+)_(any|home|away)$")
+
+
+def is_path_market(market_key: str) -> bool:
+    """True for the 'at any time' families that need the path model."""
+    return _PATH_KEY_RE.match(market_key.strip().lower()) is not None
 _SELECTION_LINE_RE = re.compile(r"\(([+-]?\d+(?:\.\d+)?)\)")
 _SELECTION_EURO_HCP_RE = re.compile(r"\((\d+):(\d+)\)")
 
@@ -689,8 +702,14 @@ def price_from_joint_matrix(
     mu_home: float,
     mu_away: float,
     marginals: Optional[MatrixMarginals] = None,
+    path_model: Optional["GoalPathModel"] = None,
 ) -> Optional[SelectionProbabilityOutcome]:
-    """Deterministically price `market_key` / `selection` from the remaining-score matrix `mat` in O(N) time."""
+    """Deterministically price `market_key` / `selection` from the remaining-score matrix `mat` in O(N) time.
+
+    `path_model` is required only for the 'at any time' families, which are
+    priced from the score-path dynamic program rather than the end-state
+    matrix.
+    """
     if state.home.goals is None or state.away.goals is None:
         return None
 
@@ -995,6 +1014,139 @@ def price_from_joint_matrix(
         return SelectionProbabilityOutcome(
             p_win=p_win, p_push=p_push, p_half_win=p_hw, p_half_loss=p_hl
         )
+
+    # 9. Path-based 'at any time' families
+    #    ('lead_by_2_any', 'lead_by_1_home', 'goals_in_row_3_home', ...)
+    # These depend on the ORDER of goals, not the end state, so they are
+    # priced from the score-path dynamic program, not from the matrix.
+    path_m = _PATH_KEY_RE.match(mkey)
+    if path_m:
+        kind = path_m.group(1)
+        n = int(path_m.group(2))
+        side = path_m.group(3)
+        if path_model is None:
+            return None
+        base = period_base_scores("full")
+        if base is None:
+            return None
+        base_diff = base[0] - base[1]
+        is_yes = sel.strip().lower() in ("yes", "1")
+        is_no = sel.strip().lower() in ("no", "2")
+        if not (is_yes or is_no):
+            return None
+        if kind == "lead_by":
+            if side == "any":
+                p_event = abs_lead_by_prob(path_model, n, base_diff)
+            else:
+                p_event = lead_by_prob(path_model, side, n, base_diff)
+        elif kind == "goals_in_row":
+            if side == "any":
+                p_event = goals_in_row_prob(path_model, n)
+            else:
+                p_event = goals_in_row_prob(path_model, n, side)
+        else:
+            return None
+        p_event = min(1.0, max(0.0, p_event))
+        p_yes = p_event
+        p_no = 1.0 - p_event
+        return SelectionProbabilityOutcome(p_win=p_yes if is_yes else p_no)
+
+    # 10. Total-goals parity ('odd_even', 'home_odd_even', 'away_odd_even')
+    if mkey in ("odd_even", "home_odd_even", "away_odd_even"):
+        if mkey == "odd_even":
+            pmf = marg.tot_pmf
+            base_g = 0
+        elif mkey == "home_odd_even":
+            pmf = marg.home_pmf
+            base_g = cur_h
+        else:
+            pmf = marg.away_pmf
+            base_g = cur_a
+        want_odd = sel.strip().lower().startswith("odd")
+        want_even = sel.strip().lower().startswith("even")
+        if not (want_odd or want_even):
+            return None
+        p_win = 0.0
+        for k, cell_p in enumerate(pmf):
+            total = base_g + k
+            if (total % 2 == 1) == want_odd:
+                p_win += cell_p
+        return SelectionProbabilityOutcome(p_win=p_win)
+
+    # 11. Clean Sheet ('home_clean_sheet', 'away_clean_sheet')
+    if mkey in ("home_clean_sheet", "away_clean_sheet"):
+        is_home = mkey.startswith("home")
+        opp_pmf = marg.away_pmf if is_home else marg.home_pmf
+        opp_base = cur_a if is_home else cur_h
+        # The opponent must not score in the remaining time.
+        p_no_goals = 0.0
+        for k, cell_p in enumerate(opp_pmf):
+            if opp_base + k == 0:
+                p_no_goals += cell_p
+        want_yes = sel.strip().lower() in ("yes", "1")
+        if not want_yes and sel.strip().lower() not in ("no", "2"):
+            return None
+        p_win = p_no_goals if want_yes else 1.0 - p_no_goals
+        return SelectionProbabilityOutcome(p_win=p_win)
+
+    # 12. Win to Nil ('home_win_to_nil', 'away_win_to_nil')
+    if mkey in ("home_win_to_nil", "away_win_to_nil"):
+        is_home = mkey.startswith("home")
+        opp_pmf = marg.away_pmf if is_home else marg.home_pmf
+        opp_base = cur_a if is_home else cur_h
+        own_pmf = marg.home_pmf if is_home else marg.away_pmf
+        own_base = cur_h if is_home else cur_a
+        sign = 1 if is_home else -1
+        # Win AND the opponent scores nothing: opponent stays on 0 and the
+        # side's own final total is strictly ahead.
+        p_win = 0.0
+        for ok, opp_cell in enumerate(opp_pmf):
+            if opp_base + ok != 0:
+                continue
+            for sk, own_cell in enumerate(own_pmf):
+                if sign * ((own_base + sk) - opp_base) > 0:
+                    p_win += opp_cell * own_cell
+        want_yes = sel.strip().lower() in ("yes", "1")
+        if not want_yes and sel.strip().lower() not in ("no", "2"):
+            return None
+        p_win = p_win if want_yes else 1.0 - p_win
+        return SelectionProbabilityOutcome(p_win=p_win)
+
+    # 13. Team total goals ('home_exact_goals', 'away_exact_goals')
+    if mkey in ("home_exact_goals", "away_exact_goals"):
+        is_home = mkey.startswith("home")
+        pmf = marg.home_pmf if is_home else marg.away_pmf
+        base_g = cur_h if is_home else cur_a
+        want = sel.strip()
+        m = re.match(r"^(\d+)\+$", want)
+        if m:
+            line = int(m.group(1))
+            p_win = sum(
+                cell_p for k, cell_p in enumerate(pmf) if base_g + k >= line
+            )
+        elif want.isdigit():
+            line = int(want)
+            p_win = sum(
+                cell_p
+                for k, cell_p in enumerate(pmf)
+                if base_g + k == line
+            )
+        else:
+            return None
+        return SelectionProbabilityOutcome(p_win=p_win)
+
+    # 14. Correct Score ('correct_score') — selection is the exact scoreline
+    if mkey == "correct_score":
+        m = re.match(r"^(\d+)\s*[:\-]\s*(\d+)$", sel.strip())
+        if not m:
+            return None
+        final_h = int(m.group(1))
+        final_a = int(m.group(2))
+        rem_h = final_h - cur_h
+        rem_a = final_a - cur_a
+        if rem_h < 0 or rem_a < 0 or rem_h >= len(mat) or rem_a >= len(mat[0]):
+            return None
+        return SelectionProbabilityOutcome(p_win=mat[rem_h][rem_a])
 
     return None
 

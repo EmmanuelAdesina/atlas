@@ -454,25 +454,36 @@ def test_fast_plane_surface_cache_avoids_rebuild():
         ("ou_2_5", "Over 2.5"), ("ou_2_5", "Under 2.5"),
         ("btts", "Yes"), ("btts", "No"),
     ]
-    t0 = time.perf_counter_ns()
-    fresh = LiveStateSpaceModel(now=NOW)
-    [fresh.estimate(state, m, s) for m, s in selections]
-    fresh_us = (time.perf_counter_ns() - t0) / 1000.0
+    def best_of(fn, reps: int = 5) -> float:
+        """Minimum wall time over `reps` runs.
 
-    t0 = time.perf_counter_ns()
-    warm = LiveStateSpaceModel(now=NOW)
-    [warm.estimate(state, m, s) for m, s in selections]
-    cold_us = (time.perf_counter_ns() - t0) / 1000.0
+        Timing a single run is noisy on a loaded machine; the minimum is the
+        statistic that actually reflects the work done.
+        """
+        out = []
+        for _ in range(reps):
+            t0 = time.perf_counter_ns()
+            fn()
+            out.append((time.perf_counter_ns() - t0) / 1000.0)
+        return min(out)
 
-    t0 = time.perf_counter_ns()
-    [warm.estimate(state, m, s) for m, s in selections]
-    cached_us = (time.perf_counter_ns() - t0) / 1000.0
+    cold = best_of(
+        lambda: [
+            LiveStateSpaceModel(now=NOW).estimate(state, m, s)
+            for m, s in selections
+        ]
+    )
+    warm_model = LiveStateSpaceModel(now=NOW)
+    [warm_model.estimate(state, m, s) for m, s in selections]
+    cached = best_of(
+        lambda: [warm_model.estimate(state, m, s) for m, s in selections]
+    )
 
-    assert cached_us < cold_us, (
-        f"cached run {cached_us:.0f}us not faster than cold run {cold_us:.0f}us "
+    assert cached < cold, (
+        f"cached run {cached:.0f}us not faster than cold run {cold:.0f}us "
         f"— the joint surface is being rebuilt per selection"
     )
-    assert cached_us < fresh_us / 2.0, (
-        f"cached run {cached_us:.0f}us is not meaningfully faster than a fresh "
-        f"model's first pass {fresh_us:.0f}us — surface cache is ineffective"
+    assert cached < cold / 2.0, (
+        f"cached run {cached:.0f}us is not meaningfully faster than a fresh "
+        f"model's first pass {cold:.0f}us — surface cache is ineffective"
     )

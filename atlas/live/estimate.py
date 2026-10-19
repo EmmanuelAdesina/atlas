@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Protocol
 
 from atlas.live.math_engine import (
+    is_path_market,
     _smooth_positive_residual,
     build_remaining_score_matrix,
     compute_matrix_marginals,
@@ -36,6 +37,7 @@ from atlas.live.math_engine import (
     price_from_joint_matrix,
 )
 from atlas.live.observe import LiveMatchState
+from atlas.live.paths import GoalPathModel
 
 
 def _second_half_score(state: LiveMatchState) -> Optional[tuple[int, int]]:
@@ -503,8 +505,23 @@ class LiveStateSpaceModel:
             self._get_surface(state, period_scope)
         )
 
+        # The path model is only needed by the 'at any time' families; building
+        # it for every selection would tax the fast plane for nothing.
+        needs_path = is_path_market(market_key)
+        nom_path = (
+            GoalPathModel.from_intensities(mu_h, mu_a, self.shared_tempo_frac)
+            if needs_path
+            else None
+        )
         nom_out = price_from_joint_matrix(
-            mat_nom, state, market_key, selection, mu_h, mu_a, marginals=marg_nom
+            mat_nom,
+            state,
+            market_key,
+            selection,
+            mu_h,
+            mu_a,
+            marginals=marg_nom,
+            path_model=nom_path,
         )
         if nom_out is None:
             return Estimate(
@@ -518,7 +535,20 @@ class LiveStateSpaceModel:
         win_samples = [nom_out.effective_win_prob]
         for s_mu_h, s_mu_a, s_mat, s_marg in scenario_mats:
             s_out = price_from_joint_matrix(
-                s_mat, state, market_key, selection, s_mu_h, s_mu_a, marginals=s_marg
+                s_mat,
+                state,
+                market_key,
+                selection,
+                s_mu_h,
+                s_mu_a,
+                marginals=s_marg,
+                path_model=(
+                    GoalPathModel.from_intensities(
+                        s_mu_h, s_mu_a, self.shared_tempo_frac
+                    )
+                    if needs_path
+                    else None
+                ),
             )
             if s_out is not None:
                 win_samples.append(s_out.effective_win_prob)

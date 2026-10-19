@@ -89,6 +89,36 @@ _HEADER_PATTERNS: list[tuple[re.Pattern, Any]] = [
     (re.compile(r"^1st Half - 1X2$"), ("1x2_1h", None, "1h")),
     (re.compile(r"^2nd Half - Over/Under$"), (None, None, "2h")),
     (re.compile(r"^1st Half - Over/Under$"), (None, None, "1h")),
+    # --- Path-based 'at any time' families (priced from the score path) ---
+    (re.compile(r"^Any Team to lead by (\d+) Goals? at any time$", re.I),
+     ("lead_by_{n}_any", None, "full")),
+    (re.compile(r"^Home Team to lead by (\d+) Goals? at any time$", re.I),
+     ("lead_by_{n}_home", None, "full")),
+    (re.compile(r"^Away Team to lead by (\d+) Goals? at any time$", re.I),
+     ("lead_by_{n}_away", None, "full")),
+    (re.compile(r"^Any Team To Score (\d+) or More Goals in a Row$", re.I),
+     ("goals_in_row_{n}_any", None, "full")),
+    (re.compile(r"^Home Team To Score (\d+) or More Goals in a Row$", re.I),
+     ("goals_in_row_{n}_home", None, "full")),
+    (re.compile(r"^Away Team To Score (\d+) or More Goals in a Row$", re.I),
+     ("goals_in_row_{n}_away", None, "full")),
+    # --- Final-state families priced from the joint matrix ---
+    (re.compile(r"^Odd/Even$"), ("odd_even", None, "full")),
+    (re.compile(r"^Home Team Odd/Even$"), ("home_odd_even", None, "full")),
+    (re.compile(r"^Away Team Odd/Even$"), ("away_odd_even", None, "full")),
+    (re.compile(r"^Home Team Clean Sheet$"), ("home_clean_sheet", None, "full")),
+    (re.compile(r"^Away Team Clean Sheet$"), ("away_clean_sheet", None, "full")),
+    (re.compile(r"^Home Team to Win to Nil$"), ("home_win_to_nil", None, "full")),
+    (re.compile(r"^Away Team to Win to Nil$"), ("away_win_to_nil", None, "full")),
+    (re.compile(r"^Home Team Goals$"), ("home_exact_goals", None, "full")),
+    (re.compile(r"^Away Team Goals$"), ("away_exact_goals", None, "full")),
+    (re.compile(r"^Correct Score"), ("correct_score", None, "full")),
+    (re.compile(r"^2nd Half - Odd/Even$"), ("odd_even", None, "2h")),
+    (re.compile(r"^2nd Half - Home Team Clean Sheet$"), ("home_clean_sheet", None, "2h")),
+    (re.compile(r"^2nd Half - Away Team Clean Sheet$"), ("away_clean_sheet", None, "2h")),
+    (re.compile(r"^2nd Half Home Team to Win to Nil$"), ("home_win_to_nil", None, "2h")),
+    (re.compile(r"^2nd Half Away Team to Win to Nil$"), ("away_win_to_nil", None, "2h")),
+    (re.compile(r"^2nd Half - Correct Score$"), ("correct_score", None, "2h")),
 ]
 
 _OU_SELECTION_RE = re.compile(r"^(Over|Under)\s+(\d+(?:\.\d+)?)$")
@@ -148,7 +178,31 @@ def _match_header(label: str) -> Optional[tuple[Optional[str], Optional[float], 
                 return (f"handicap_{m.group(1).replace(':', '_')}", None, "full")
             if label.startswith("Asian Handicap"):
                 return (f"ah_{m.group(1)}", float(m.group(1)), "full")
+            if key and "{n}" in key:
+                # 'Any Team to lead by 2 Goals at any time' -> lead_by_2_any
+                key = key.format(n=m.group(1))
             return (key, line, period)
+    return None
+
+
+_TEAM_OU_RE = re.compile(r"^(?P<team>.+?) Over/Under$")
+
+
+def _team_over_under_key(label: str, home_team: str, away_team: str) -> Optional[str]:
+    """Map a team-specific Over/Under title to home_ou / away_ou.
+
+    The live board titles these markets with the team name ('Beitar
+    Jerusalem FC Over/Under'), so the side can only be identified against
+    the match's own team names.
+    """
+    m = _TEAM_OU_RE.match(label.strip())
+    if not m:
+        return None
+    team = m.group("team").strip()
+    if home_team and team.lower() == home_team.strip().lower():
+        return "home_ou_pending"
+    if away_team and team.lower() == away_team.strip().lower():
+        return "away_ou_pending"
     return None
 
 
@@ -177,7 +231,17 @@ def extract_markets(texts: list[str], match_id: str) -> list[dict]:
     )
     # Strip icon glyphs up front (locks included): a lock is encoded purely
     # as the absence of a price after a selection name.
-    region = [t for t in texts[start:end] if t.strip() and not _GLYPH_RE.match(t)]
+    region = [t.strip() for t in texts[start:end] if t.strip() and not _GLYPH_RE.match(t)]
+
+    # The viewed match's team names, needed to identify team-specific markets
+    # such as 'Beitar Jerusalem FC Over/Under'.
+    home_team = ""
+    away_team = ""
+    for t in region:
+        if " vs " in t and len(t) < 80:
+            parts = t.split(" vs ", 1)
+            home_team, away_team = parts[0].strip(), parts[1].strip()
+            break
 
     markets: list[dict] = []
     current: Optional[dict] = None
@@ -209,6 +273,10 @@ def extract_markets(texts: list[str], match_id: str) -> list[dict]:
     while i < len(region):
         tok = region[i]
         hdr = _match_header(tok)
+        if hdr is None:
+            team_ou = _team_over_under_key(tok, home_team, away_team)
+            if team_ou is not None:
+                hdr = (team_ou, None, "full")
         if hdr is not None:
             flush()
             key, line, period = hdr if hdr else (None, None, None)
