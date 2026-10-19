@@ -321,6 +321,149 @@ def cmd_boss(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_plan(args: argparse.Namespace) -> int:
+    """Full snapshot: price every open market, run the sequential portfolio,
+    record accepted bets in the ledger (observe-only).
+
+    The ledger is the single source of truth for exposure, P&L and the hard
+    daily stop, so re-running this command against the same ledger reflects
+    real operational state.
+    """
+    from atlas.live.loop import Opportunity
+    from atlas.ops.ledger import BetLedger, LedgerConfig
+    from atlas.portfolio.sequential import SequentialConfig, SequentialPortfolio
+
+    try:
+        fixture = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        console.print(f"[red]Cannot read fixture: {e}[/red]")
+        return 1
+    match_id = fixture["match_id"]
+    meta = fixture.get("meta", {})
+    observed_at = datetime.fromisoformat(meta.get("observed_at", ""))
+
+    ledger = BetLedger(
+        LedgerConfig(daily_loss_limit=args.daily_loss_limit), log_path=args.ledger
+    )
+    stop_active = ledger.is_daily_stop_active()
+    prior_bets = ledger.bets_for(match_id)
+    console.print(
+        f"[bold]{meta.get('fixture', match_id)}[/bold] | ledger "
+        f"{args.ledger}: {len(prior_bets)} prior bet(s) on this match, "
+        f"daily P&L NGN {ledger.daily_pnl():.0f}"
+    )
+    if stop_active:
+        console.print(
+            f"[red]HARD STOP active — daily P&L NGN {ledger.daily_pnl():.0f} "
+            f"breached {args.daily_loss_limit:.0f}. No new bets will be planned.[/red]"
+        )
+
+    for m in fixture.get("markets", []):
+        m.setdefault("match_id", match_id)
+    collector = SportyBetCollector()
+    result = collector.ingest_snapshot(
+        fixture["markets"],
+        source_url=meta.get("source_url", ""),
+        collected_at=observed_at,
+    )
+    records, skipped = map_sport_markets(
+        result.raw_data or [],
+        source_url=result.metadata.get("source_url", ""),
+        collected_at=observed_at,
+    )
+    open_records = [r for r in records if r.status == "open"]
+    state = _build_state_from_fixture(fixture, observed_at)
+    console.print(
+        f"{state.home.name} {state.home.goals}:{state.away.goals} "
+        f"{state.away.name} ({state.period}, {state.clock_label}) | "
+        f"{len(records)} mapped, {len(open_records)} open, "
+        f"{len(skipped)} suspended/skipped"
+    )
+
+    model = LiveStateSpaceModel(now=observed_at)
+    opportunities: list[Opportunity] = []
+    for r in open_records:
+        for s in r.selections:
+            est = model.estimate(state, r.market_key, s.name)
+            if est.abstained or est.p is None:
+                continue
+            opp = Opportunity(
+                match_id=match_id,
+                market_key=r.market_key,
+                selection=s.name,
+                odds=s.odds,
+                model_p=est.p,
+                model_name=est.model_name,
+                p_lower=est.p_lower,
+                p_push=est.p_push,
+            )
+            if (opp.ev_lower or opp.ev) >= args.min_ev:
+                opportunities.append(opp)
+    console.print(
+        f"{len(opportunities)} selections clear the conservative EV floor "
+        f"{args.min_ev:.2f} (of {sum(len(r.selections) for r in open_records)} open odds)"
+    )
+
+    match_state = {
+        "period": state.period,
+        "clock_minute": state.clock_minute,
+        "score": (state.home.goals, state.away.goals),
+        "events": fixture.get("events", []),
+    }
+    portfolio = SequentialPortfolio(SequentialConfig())
+    decisions = portfolio.evaluate_snapshot(opportunities, match_state, prior_bets)
+
+    table = Table("market", "selection", "odds", "EV", "stake", "action", "reason")
+    for d in decisions[:25]:
+        table.add_row(
+            d.opportunity.market_key,
+            d.opportunity.selection,
+            f"{d.opportunity.odds:.2f}",
+            f"{d.opportunity.ev:+.3f}",
+            f"{d.stake_ngn:.0f}",
+            "BET" if d.should_bet else "pass",
+            d.reason[:52],
+        )
+    console.print(table)
+
+    accepted = [d for d in decisions if d.should_bet and not stop_active]
+    for d in accepted:
+        bet_id = f"{match_id}:{d.opportunity.market_key}:{d.opportunity.selection}"
+        ok = ledger.record_pending(
+            {
+                "bet_id": bet_id,
+                "match_id": match_id,
+                "market_key": d.opportunity.market_key,
+                "selection": d.opportunity.selection,
+                "odds": d.opportunity.odds,
+                "stake_ngn": d.stake_ngn,
+                "model_p": d.opportunity.model_p,
+                "p_lower": d.opportunity.p_lower,
+                "ev": d.opportunity.ev,
+                "confidence": "unknown",
+            }
+        )
+        status = (
+            "[green]recorded[/green]" if ok else "[yellow]rejected by policy gate[/yellow]"
+        )
+        console.print(
+            f"BET {d.opportunity.market_key} '{d.opportunity.selection}' "
+            f"NGN {d.stake_ngn:.0f} @ {d.opportunity.odds:.2f} -> {status}"
+        )
+
+    summary = ledger.summary()
+    console.print(
+        f"[bold]Plan:[/bold] {len(accepted)} bet(s) in this snapshot | "
+        f"match exposure now NGN {ledger.match_exposure(match_id):.0f} "
+        f"(cap {SequentialConfig().max_exposure_per_match:.0f}) | "
+        f"ledger: {summary['total_bets']} bets, daily P&L NGN "
+        f"{summary['daily_pnl_ngn']:.0f}, open exposure NGN "
+        f"{summary['unrealized_exposure_ngn']:.0f}, stop active={summary['daily_stop_active']}"
+    )
+    console.print(f"Recorded in {args.ledger} (observe-only — nothing submitted)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="atlas", description="Atlas V1 SportyBet Nigeria intelligence pipeline"
@@ -370,6 +513,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Decision log output path",
     )
     b.set_defaults(func=cmd_boss)
+
+    plan = sub.add_parser(
+        "plan",
+        help="Full snapshot: price every open market, run the sequential "
+             "portfolio, and record bets in the ledger (observe-only).",
+    )
+    plan.add_argument("--fixture", required=True, help="Recorded observation JSON")
+    plan.add_argument("--ledger", default="data/ops/ledger.jsonl", help="Ledger JSONL path")
+    plan.add_argument("--min-ev", type=float, default=0.05, help="EV floor")
+    plan.add_argument(
+        "--daily-loss-limit",
+        type=float,
+        default=-500.0,
+        help="Hard daily stop in NGN (default: -500)",
+    )
+    plan.set_defaults(func=cmd_plan)
     return p
 
 

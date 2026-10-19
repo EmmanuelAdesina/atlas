@@ -38,6 +38,7 @@ from typing import Any, Optional, Union
 from atlas.live.decisions import PolicyConfig
 from atlas.live.math_engine import fractional_kelly_stake
 from atlas.live.observe import LiveMatchState
+from atlas.ops.ledger import BetLedger, BetRecord, LedgerConfig
 
 DAILY_LOSS_LIMIT_NGN = 500.0
 FEED_STALE_AFTER_S = 60.0
@@ -80,76 +81,6 @@ class MatchCandidate:
 
 
 @dataclass
-class BetLedger:
-    """Minimal P&L ledger the Boss reads for risk governance.
-
-    Only model-output-backed bets are recorded (each entry carries the model
-    probability at placement). daily_pnl_ngn is realized P&L from settled
-    bets; open_exposure_ngn is stake currently at risk on pending bets.
-    """
-
-    currency: str = "NGN"
-    pending: list[dict] = field(default_factory=list)
-    settled: list[dict] = field(default_factory=list)
-
-    def record_pending(self, bet: dict) -> None:
-        self.pending.append(dict(bet))
-
-    def settle(
-        self,
-        match_id: str,
-        market_key: str,
-        selection: str,
-        result: str,
-        payout_ngn: Optional[float] = None,
-    ) -> Optional[dict]:
-        """Move a pending bet to settled with realized P&L.
-
-        result: 'win' | 'loss' | 'void'. payout defaults to stake*odds (win),
-        stake (void), or 0 (loss).
-        """
-        for i, bet in enumerate(self.pending):
-            if (
-                bet.get("match_id") == match_id
-                and bet.get("market_key") == market_key
-                and bet.get("selection") == selection
-            ):
-                stake = float(bet.get("stake_ngn", 0.0))
-                odds = float(bet.get("odds", 0.0) or 0.0)
-                if payout_ngn is None:
-                    payout_ngn = stake * odds if result == "win" else (
-                        stake if result == "void" else 0.0
-                    )
-                settled = {
-                    **bet,
-                    "result": result,
-                    "payout_ngn": float(payout_ngn),
-                    "pnl_ngn": float(payout_ngn) - stake,
-                    "settled_at": datetime.now(timezone.utc).isoformat(),
-                }
-                self.pending.pop(i)
-                self.settled.append(settled)
-                return settled
-        return None
-
-    def bets_for(self, match_id: str) -> list[dict]:
-        return [
-            b for b in self.pending + self.settled if b.get("match_id") == match_id
-        ]
-
-    @property
-    def daily_pnl_ngn(self) -> float:
-        return float(sum(b.get("pnl_ngn", 0.0) for b in self.settled))
-
-    @property
-    def open_exposure_ngn(self) -> float:
-        return float(sum(b.get("stake_ngn", 0.0) for b in self.pending))
-
-    def daily_reset(self) -> None:
-        self.pending.clear()
-        self.settled.clear()
-
-
 class Boss:
     """Slow-plane operations manager. Runs every poll_interval_s (default 20s)."""
 

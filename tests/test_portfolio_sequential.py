@@ -252,3 +252,87 @@ def test_record_bet_round_trip_no_rebalance_when_unchanged():
     d2 = pf.evaluate_snapshot([opp2], MATCH_STATE, [entry])[0]
     assert not d2.should_bet
     assert "no rebalance trigger" in d2.reason
+
+
+# --- Integration: canonical ledger records must feed portfolio accounting ---
+
+def test_prior_bets_from_ledger_count_as_exposure():
+    """Ledger dicts carry `stake_ngn`; the portfolio must read that, not `stake`.
+
+    Regression: prior-bet exposure silently read 0.0, so the per-match
+    exposure cap and bet counts never saw real money at risk.
+    """
+    import tempfile
+    import os
+    from atlas.ops.ledger import BetLedger, LedgerConfig
+
+    tmp = os.path.join(tempfile.mkdtemp(prefix="atlas-portfolio-"), "ledger.jsonl")
+    ledger = BetLedger(LedgerConfig(), log_path=tmp)
+    for _ in range(3):
+        ledger.record_pending(
+            {
+                "match_id": "m1",
+                "market_key": "ou_2_5",
+                "selection": "Over 2.5",
+                "odds": 2.0,
+                "stake_ngn": 1000.0,
+                "model_p": 0.6,
+                "p_lower": 0.55,
+                "ev": 0.2,
+                "confidence": "unknown",
+            }
+        )
+    prior = ledger.bets_for("m1")
+    assert len(prior) == 3
+    assert all("stake_ngn" in b for b in prior)
+    assert "stake" not in prior[0]
+
+    opp = Opportunity(
+        match_id="m1",
+        market_key="ou_2_5",
+        selection="Over 2.5",
+        odds=2.1,
+        model_p=0.62,
+        model_name="test-model",
+        p_lower=0.57,
+    )
+    decisions = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, prior)
+    # 3 x 1000 = 3000 NGN already committed == the per-match exposure cap,
+    # so the ledger-backed prior state must block any further stake.
+    assert decisions[0].should_bet is False
+    assert "exposure cap" in decisions[0].reason
+
+
+def test_ledger_backed_prior_bets_trigger_rebalance_not_fresh_bet():
+    """A prior ledger bet on the same selection must not read as 'new selection'."""
+    import tempfile
+    import os
+    from atlas.ops.ledger import BetLedger, LedgerConfig
+
+    tmp = os.path.join(tempfile.mkdtemp(prefix="atlas-portfolio-"), "ledger.jsonl")
+    ledger = BetLedger(LedgerConfig(), log_path=tmp)
+    ledger.record_pending(
+        {
+            "match_id": "m1",
+            "market_key": "ou_2_5",
+            "selection": "Over 2.5",
+            "odds": 2.0,
+            "stake_ngn": 200.0,
+            "model_p": 0.6,
+            "p_lower": 0.55,
+            "ev": 0.2,
+            "confidence": "unknown",
+        }
+    )
+    prior = ledger.bets_for("m1")
+    opp = Opportunity(
+        match_id="m1",
+        market_key="ou_2_5",
+        selection="Over 2.5",
+        odds=2.0,
+        model_p=0.6,
+        model_name="test-model",
+        p_lower=0.55,
+    )
+    decisions = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, prior)
+    assert "no prior bet on this market/selection" not in decisions[0].reason

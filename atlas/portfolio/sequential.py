@@ -191,7 +191,10 @@ class SequentialPortfolio:
             if mid is None:
                 continue
             try:
-                stake_val = float(bet.get("stake") or 0.0)
+                # Ledger records carry stake_ngn (BetRecord.to_dict); Boss/boss
+                # test dicts carry stake. Accept both so prior-bet accounting
+                # never silently reads zero exposure.
+                stake_val = float(bet.get("stake_ngn") or bet.get("stake") or 0.0)
             except (TypeError, ValueError):
                 stake_val = 0.0
             exposure[mid] = exposure.get(mid, 0.0) + stake_val

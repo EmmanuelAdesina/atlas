@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 VALID_STATUSES = {"pending", "placed", "won", "lost", "void"}
 SETTLED_STATUSES = {"won", "lost", "void"}
@@ -184,3 +185,95 @@ class BetLedger:
 
     def _stake_in_range(self, stake_ngn: float) -> bool:
         return self.config.min_stake <= stake_ngn <= self.config.max_stake
+
+    # ------------------------------------------------------------------
+    # Dict-oriented adapter used by the Boss control plane.
+    # This is the SAME store — the Boss must read the canonical ledger so it
+    # sees the persisted bets and the hard daily stop, not a second in-memory
+    # copy that silently drifts.
+    # ------------------------------------------------------------------
+
+    def bets_for(self, match_id: str) -> list[dict]:
+        with self._lock:
+            return [
+                b.to_dict() for b in self._bets.values() if b.match_id == match_id
+            ]
+
+    def record_pending(self, bet: dict) -> bool:
+        """Record a dict-shaped bet (Boss API). Respects the hard daily stop."""
+        rec = BetRecord(
+            bet_id=str(bet.get("bet_id") or bet.get("id") or uuid4().hex),
+            match_id=str(bet.get("match_id", "")),
+            market_key=str(bet.get("market_key", "")),
+            selection=str(bet.get("selection", "")),
+            odds=float(bet.get("odds", 0.0) or 0.0),
+            stake_ngn=float(bet.get("stake_ngn", bet.get("stake", 0.0)) or 0.0),
+            model_p=float(bet.get("model_p", 0.0) or 0.0),
+            p_lower=bet.get("p_lower"),
+            ev=float(bet.get("ev", 0.0) or 0.0),
+            confidence=str(bet.get("confidence", "unknown")),
+            correlation_groups=list(bet.get("correlation_groups", [])),
+        )
+        return self.place_bet(rec)
+
+    def settle(
+        self,
+        match_id: str,
+        market_key: str,
+        selection: str,
+        result: str,
+        payout_ngn: Optional[float] = None,
+    ) -> Optional[dict]:
+        """Settle by (match, market, selection). result: 'win'|'loss'|'void'."""
+        status = {"win": "won", "loss": "lost", "void": "void"}.get(result, result)
+        with self._lock:
+            target = None
+            for b in self._bets.values():
+                if (
+                    b.match_id == match_id
+                    and b.market_key == market_key
+                    and b.selection == selection
+                    and b.status not in SETTLED_STATUSES
+                ):
+                    target = b
+                    break
+            if target is None:
+                return None
+            bet_id = target.bet_id
+        if payout_ngn is None:
+            self.settle_bet(bet_id, status, None)
+        else:
+            with self._lock:
+                b = self._bets.get(bet_id)
+                if b is not None:
+                    b.status = status
+                    b.settled_at = datetime.now(timezone.utc).isoformat()
+                    b.settled_odds = None
+                    b.pnl_ngn = round(float(payout_ngn) - b.stake_ngn, 2)
+                    self._append(b, "bet_settled")
+        return self._bets[bet_id].to_dict()
+
+    @property
+    def daily_pnl_ngn(self) -> float:
+        return self.daily_pnl()
+
+    @property
+    def open_exposure_ngn(self) -> float:
+        with self._lock:
+            return float(
+                sum(
+                    b.stake_ngn
+                    for b in self._bets.values()
+                    if b.status not in SETTLED_STATUSES
+                )
+            )
+
+    def daily_reset(self) -> None:
+        """Operator action: archive today's bets and clear the stop."""
+        with self._lock:
+            for b in self._bets.values():
+                b.status = "void"
+                b.pnl_ngn = 0.0
+                b.settled_at = datetime.now(timezone.utc).isoformat()
+                self._append(b, "bet_voided_by_reset")
+            self._bets.clear()

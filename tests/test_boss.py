@@ -5,6 +5,9 @@ board data only, and assert on decisions, risk ratchets, and drift flags.
 """
 
 from datetime import datetime, timedelta, timezone
+import os
+import tempfile
+from uuid import uuid4
 
 import pytest
 
@@ -17,6 +20,14 @@ from atlas.ops.boss import (
     BossDecision,
     MatchCandidate,
 )
+
+# The canonical ledger is persistent by design, so every test needs its own
+# file — otherwise bets settle across tests and the daily stop leaks.
+_TMP = tempfile.mkdtemp(prefix="atlas-boss-tests-")
+
+
+def fresh_ledger() -> BetLedger:
+    return BetLedger(log_path=os.path.join(_TMP, f"{uuid4().hex}.jsonl"))
 
 
 def make_state(
@@ -86,7 +97,7 @@ def make_board() -> list[dict]:
 
 def make_boss(ledger: BetLedger | None = None, **policy_kwargs) -> Boss:
     policy = PolicyConfig(**policy_kwargs)
-    return Boss(ledger if ledger is not None else BetLedger(), policy)
+    return Boss(ledger if ledger is not None else fresh_ledger(), policy)
 
 
 # --- Risk governor ---
@@ -94,7 +105,7 @@ def make_boss(ledger: BetLedger | None = None, **policy_kwargs) -> Boss:
 
 @pytest.mark.asyncio
 async def test_kill_switch_breaches_daily_loss_limit():
-    ledger = BetLedger()
+    ledger = fresh_ledger()
     ledger.record_pending(
         {"match_id": "m1", "market_key": "ou_1_5", "selection": "Under 1.5",
          "stake_ngn": 600.0, "odds": 1.5, "model_p": 0.7}
@@ -296,24 +307,26 @@ def test_kelly_stake_zero_below_min_stake_or_no_edge():
 
 
 def test_review_match_flags_drift_when_realized_trails_predicted():
-    ledger = BetLedger()
+    ledger = fresh_ledger()
+    # Stakes stay under the -NGN500 daily stop (2 x 200 = -400) so this test
+    # isolates drift detection rather than tripping the hard stop.
     for _ in range(2):
         ledger.record_pending(
             {"match_id": "m1", "market_key": "ou_1_5", "selection": "Under 1.5",
-             "stake_ngn": 500.0, "odds": 1.8, "model_p": 0.7}
+             "stake_ngn": 200.0, "odds": 1.8, "model_p": 0.7}
         )
         ledger.settle("m1", "ou_1_5", "Under 1.5", "loss", payout_ngn=0.0)
     boss = Boss(ledger, PolicyConfig())
     review = boss.review_match("m1")
     assert review["settled_bets"] == 2
-    assert review["realized_pnl_ngn"] == pytest.approx(-1_000.0)
+    assert review["realized_pnl_ngn"] == pytest.approx(-400.0)
     assert review["drift_flag"] is True
     assert "realized ROI" in review["drift_reason"]
     assert review["action"] == "monitor_model"
 
 
 def test_review_match_ok_when_realized_matches_prediction():
-    ledger = BetLedger()
+    ledger = fresh_ledger()
     ledger.record_pending(
         {"match_id": "m1", "market_key": "ou_1_5", "selection": "Under 1.5",
          "stake_ngn": 500.0, "odds": 1.1, "model_p": 0.6}
@@ -349,7 +362,7 @@ async def test_tightening_never_loosens_policy():
 
 @pytest.mark.asyncio
 async def test_negative_pnl_ratchets_risk_without_loosening():
-    ledger = BetLedger()
+    ledger = fresh_ledger()
     ledger.record_pending(
         {"match_id": "m1", "market_key": "ou_1_5", "selection": "Under 1.5",
          "stake_ngn": 200.0, "odds": 1.5, "model_p": 0.7}
@@ -368,7 +381,7 @@ async def test_negative_pnl_ratchets_risk_without_loosening():
 @pytest.mark.asyncio
 async def test_decisions_are_logged_with_reasons(tmp_path):
     log_path = tmp_path / "boss_decisions.jsonl"
-    boss = Boss(BetLedger(), PolicyConfig(), decision_log_path=log_path)
+    boss = Boss(fresh_ledger(), PolicyConfig(), decision_log_path=log_path)
     await boss.evaluate_operation("m1", make_state(), [], [])
     lines = log_path.read_text(encoding="utf-8").strip().split("\n")
     assert len(lines) == 1
