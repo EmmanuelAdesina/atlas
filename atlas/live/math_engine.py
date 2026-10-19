@@ -711,12 +711,14 @@ def price_from_joint_matrix(
     mu_away: float,
     marginals: Optional[MatrixMarginals] = None,
     path_model: Optional["GoalPathModel"] = None,
+    corner_model: Optional[Any] = None,
 ) -> Optional[SelectionProbabilityOutcome]:
     """Deterministically price `market_key` / `selection` from the remaining-score matrix `mat` in O(N) time.
 
     `path_model` is required only for the 'at any time' families, which are
     priced from the score-path dynamic program rather than the end-state
-    matrix.
+    matrix. `corner_model` is required only for the corner families, which
+    are a separate counting process.
     """
     if state.home.goals is None or state.away.goals is None:
         return None
@@ -1403,7 +1405,76 @@ def price_from_joint_matrix(
                     p_win += cell
         return SelectionProbabilityOutcome(p_win=p_win)
 
-    # 17. Combination markets ('combo_1x2__ou_1_5', 'combo_ou_2_5__btts', ...)
+    # 18. Corner markets ('corners_ou_9_5', 'corners_ah_-1_5', ...)
+    #     Corners are a separate counting process with their own rate, so
+    #     they are priced from the corner model rather than the goal matrix.
+    if mkey.startswith("corners_"):
+        if corner_model is None:
+            return None
+        sub = mkey[len("corners_"):]
+        if sub.startswith("ou_"):
+            line = float(sub[3:].replace("_", "."))
+            is_over = sel.strip().lower().startswith("over")
+            is_under = sel.strip().lower().startswith("under")
+            if not (is_over or is_under):
+                return None
+            pmf = corner_model.remaining_total_pmf()
+            base = corner_model.home_so_far + corner_model.away_so_far
+            p_win = 0.0
+            p_push = 0.0
+            for k, cell_p in enumerate(pmf):
+                total = base + k
+                if abs(total - line) < 1e-9:
+                    p_push += cell_p
+                elif (is_over and total > line) or (is_under and total < line):
+                    p_win += cell_p
+            return SelectionProbabilityOutcome(p_win=p_win, p_push=p_push)
+        if sub.startswith("ah_"):
+            line = float(sub[3:].replace("_", "."))
+            is_home = sel.startswith("Home")
+            is_away = sel.startswith("Away")
+            if not (is_home or is_away):
+                return None
+            diffs = corner_model.diff_pmf()
+            base_diff = (
+                (corner_model.home_so_far - corner_model.away_so_far)
+                if is_home
+                else (corner_model.away_so_far - corner_model.home_so_far)
+            )
+            team_line = line if is_home else -line
+            frac = round(abs(team_line) - math.floor(abs(team_line)), 2)
+            if frac in (0.25, 0.75):
+                return SelectionProbabilityOutcome(
+                    p_win=0.0, p_half_win=0.0, p_half_loss=0.0, p_push=0.0
+                )
+            p_win = 0.0
+            p_push = 0.0
+            for d, cell_p in diffs.items():
+                adj = base_diff + d + team_line
+                if abs(adj) < 1e-9:
+                    p_push += cell_p
+                elif adj > 0:
+                    p_win += cell_p
+            return SelectionProbabilityOutcome(p_win=p_win, p_push=p_push)
+        if sub.startswith("exact_"):
+            want = sub[6:].replace("_", ".")
+            is_home = sel.startswith("Home")
+            is_away = sel.startswith("Away")
+            if not (is_home or is_away):
+                return None
+            pmf = corner_model.home_pmf() if is_home else corner_model.away_pmf()
+            base = corner_model.home_so_far if is_home else corner_model.away_so_far
+            try:
+                target = float(want)
+            except ValueError:
+                return None
+            p_win = 0.0
+            for k, cell_p in enumerate(pmf):
+                if abs((base + k) - target) < 1e-9:
+                    p_win += cell_p
+            return SelectionProbabilityOutcome(p_win=p_win)
+
+    # 19. Combination markets ('combo_1x2__ou_1_5', 'combo_ou_2_5__btts', ...)
     # A combination such as '1X2 & Over/Under 1.5' settles on the JOINT
     # outcome, so its probability is NOT the product of the two marginals.
     # It is read straight off the joint matrix, which is exactly where a

@@ -157,6 +157,16 @@ _HEADER_PATTERNS: list[tuple[re.Pattern, Any]] = [
     # --- No-draw variants ---
     (re.compile(r"^No Draw Both Teams To Score(?: Yes/No)?$"),
      ("btts_no_draw", None, "full")),
+    # --- Corner markets (a separate counting process) ---
+    # The exact titles on the book's Corners tab are not yet confirmed
+    # against a live board; the mapping lives here so adding one is a
+    # one-line change. The line is read from the selection text.
+    (re.compile(r"^Corners Over/Under$"), ("corners_ou_pending", None, "full")),
+    (re.compile(r"^Total Corners$"), ("corners_ou_pending", None, "full")),
+    (re.compile(r"^Corners Handicap$"), ("corners_ah_pending", None, "full")),
+    (re.compile(r"^Asian Handicap Corners$"), ("corners_ah_pending", None, "full")),
+    (re.compile(r"^Handicap Corners$"), ("corners_ah_pending", None, "full")),
+    (re.compile(r"^Corners$"), ("corners_ou_pending", None, "full")),
 ]
 
 _OU_SELECTION_RE = re.compile(r"^(Over|Under)\s+(\d+(?:\.\d+)?)$")
@@ -212,9 +222,9 @@ def _match_header(label: str) -> Optional[tuple[Optional[str], Optional[float], 
         m = pat.match(label)
         if m:
             key, line, period = spec
-            if label.startswith("Handicap"):
+            if label.startswith("Handicap") and m.re.groups:
                 return (f"handicap_{m.group(1).replace(':', '_')}", None, "full")
-            if label.startswith("Asian Handicap"):
+            if label.startswith("Asian Handicap") and m.re.groups:
                 return (f"ah_{m.group(1)}", float(m.group(1)), "full")
             if key and "{n}" in key:
                 # 'Any Team to lead by 2 Goals at any time' -> lead_by_2_any
@@ -438,11 +448,31 @@ def extract_markets(texts: list[str], match_id: str) -> list[dict]:
                     ]
                 line_txt = ("%g" % m["line"]).replace(".", "_")
                 m["market_key"] = f"{prefix}_{line_txt}"
+    # Post-process corner keys: the line is in the selection text too.
+    #
+    # The exact titles the book uses on the Corners tab have not been
+    # confirmed against a live board, so the mapping is kept in one obvious
+    # place: adding a title is a one-line change here.
+    for m in cleaned:
+        key = m.get("market_key") or ""
+        if key.startswith("corners_") and key.endswith("_pending"):
+            line = m.get("line")
+            if line is None:
+                continue
+            line_txt = ("%g" % line).replace(".", "_")
+            m["market_key"] = key[: -len("_pending")] + f"_{line_txt}"
     return cleaned
 
 
 def _maybe_set_ou_line(market: dict, selection: str, odds: Optional[float] = None) -> None:
     label = market["market_label"]
+    key = market.get("market_key") or ""
+    if key.startswith("corners_") and key.endswith("_pending"):
+        # A corner market takes its line from the selection ('Over 9.5').
+        m = _OU_SELECTION_RE.match(selection.strip())
+        if m:
+            market["line"] = float(m.group(2))
+        return
     if (
         label in (
             "Over/Under",

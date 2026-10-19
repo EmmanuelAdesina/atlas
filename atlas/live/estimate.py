@@ -37,6 +37,7 @@ from atlas.live.math_engine import (
     price_from_joint_matrix,
 )
 from atlas.live.observe import LiveMatchState
+from atlas.live.corners import CornerModel
 from atlas.live.paths import GoalPathModel
 
 
@@ -508,6 +509,11 @@ class LiveStateSpaceModel:
         # The path model is only needed by the 'at any time' families; building
         # it for every selection would tax the fast plane for nothing.
         needs_path = is_path_market(market_key)
+        needs_corners = market_key.strip().lower().startswith("corners_")
+        corner_model = None
+        if needs_corners:
+            rem = estimate_remaining_minutes(state, period_scope="full").rem_mean
+            corner_model = CornerModel.from_state(state, rem)
         nom_path = (
             GoalPathModel.from_intensities(mu_h, mu_a, self.shared_tempo_frac)
             if needs_path
@@ -522,6 +528,7 @@ class LiveStateSpaceModel:
             mu_a,
             marginals=marg_nom,
             path_model=nom_path,
+            corner_model=corner_model,
         )
         if nom_out is None:
             return Estimate(
@@ -544,11 +551,12 @@ class LiveStateSpaceModel:
                 marginals=s_marg,
                 path_model=(
                     GoalPathModel.from_intensities(
-                        s_mu_h, s_mu_a, self.shared_tempo_frac
+                        s_mu_h, s_mu_a
                     )
                     if needs_path
                     else None
                 ),
+                corner_model=corner_model,
             )
             if s_out is not None:
                 win_samples.append(s_out.effective_win_prob)
