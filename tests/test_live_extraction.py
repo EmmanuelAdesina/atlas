@@ -219,3 +219,79 @@ def test_panel_is_ready_when_complete():
     ready, reason = panel_is_ready(state, [{"status": "open"}] * 20)
     assert ready is True
     assert reason == "ready"
+
+
+# --- Calibration: Rest-of-Match is only the same event at a level score ---
+
+def test_rest_of_match_is_not_used_to_calibrate_a_non_level_1x2():
+    """'Rest of the Match (current score 1:0)' settles on the REMAINING time
+    treated as a fresh match, so it is not the same event as the full-time
+    1X2 unless the score is level.
+
+    Calibrating across the two made the model believe a side had ~9% to win
+    the full-time 1X2 at 65.00 — a +4.5 EV phantom edge.
+    """
+    from datetime import datetime, timezone
+
+    from atlas.live.estimate import CalibratedModel, LiveStateSpaceModel
+    from atlas.live.math_engine import devig_shin
+    from atlas.live.observe import LiveMatchState, TeamStats
+
+    # The live board's prices for a 1-0 match at 68'.
+    full, _ = devig_shin({"Home": 1.07, "Draw": 6.5, "Away": 65.0})
+    rest, _ = devig_shin({"Home": 2.6, "Draw": 1.7, "Away": 8.25})
+    market_fair = {("1x2", k): v for k, v in full.items()}
+    market_fair.update({("rest_of_match_1x2", k): v for k, v in rest.items()})
+
+    state = LiveMatchState(
+        match_id="m1",
+        home=TeamStats(name="Home", goals=1),
+        away=TeamStats(name="Away", goals=0),
+        period="2h",
+        clock_minute=68.0,
+        observed_at=datetime.now(timezone.utc),
+        source="test",
+    )
+    model = CalibratedModel(
+        base_model=LiveStateSpaceModel(now=datetime.now(timezone.utc)),
+        market_fair=market_fair,
+    )
+    est = model.estimate(state, "1x2", "Away")
+    assert est.p is not None
+    # The away side's chance of winning at 1-0 down is small, and the
+    # calibrated probability must be in the same league as the book's own.
+    assert est.p < 0.05, f"calibrated p {est.p:.4f} is far above the market's {full['Away']:.4f}"
+    ev = est.p * 65.0 - 1.0
+    assert ev < 0.05, f"phantom edge survived: EV {ev:+.3f} at 65.00"
+
+
+def test_rest_of_match_is_used_when_the_score_is_level():
+    """At 0-0 the remaining time IS the match, so the two are the same event."""
+    from datetime import datetime, timezone
+
+    from atlas.live.estimate import CalibratedModel, LiveStateSpaceModel
+    from atlas.live.math_engine import devig_shin
+    from atlas.live.observe import LiveMatchState, TeamStats
+
+    full, _ = devig_shin({"Home": 2.2, "Draw": 3.4, "Away": 3.2})
+    rest, _ = devig_shin({"Home": 2.0, "Draw": 3.3, "Away": 3.3})
+    market_fair = {("1x2", k): v for k, v in full.items()}
+    market_fair.update({("rest_of_match_1x2", k): v for k, v in rest.items()})
+    state = LiveMatchState(
+        match_id="m1",
+        home=TeamStats(name="Home", goals=0),
+        away=TeamStats(name="Away", goals=0),
+        period="2h",
+        clock_minute=68.0,
+        observed_at=datetime.now(timezone.utc),
+        source="test",
+    )
+    model = CalibratedModel(
+        base_model=LiveStateSpaceModel(now=datetime.now(timezone.utc)),
+        market_fair=market_fair,
+    )
+    est = model.estimate(state, "1x2", "Home")
+    assert est.p is not None
+    # Shrunk toward the rest-of-match prior, which is between the model's
+    # own probability and the market's.
+    assert est.p != full["Home"]

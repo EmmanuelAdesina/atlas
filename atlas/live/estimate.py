@@ -658,18 +658,28 @@ class CalibratedModel:
                 diagnostics={**base.diagnostics, "shrink_pct": 0.0},
             )
 
-        # Calibrate using Rest-of-Match only when selection semantics are identical.
-        # 1x2 Home/Draw/Away in Rest-of-Match means the same as 1x2 full-time.
-        # But 1x2_2up/Away means "home wins by 3+" — NOT the same as rest_of_match/Away.
-        # Calibrating across different meanings produces fake edges.
+        # Calibrate using Rest-of-Match only when the two are the SAME event.
+        # 'Rest of the Match (current score 1:0)' settles on the result of
+        # the REMAINING time treated as a fresh match, so its 'Away' is
+        # P(the away side leads in the remaining time) — which is NOT
+        # P(the away side wins the full-time 1X2) unless the score is level.
+        # Calibrating a full-time 1X2 against it at 1-0 made the model
+        # believe a side had ~9% to win at 65.00, a +4.5 EV phantom edge. It
+        # is also a full-match market, so it says nothing about a half-time
+        # 1X2.
         mkt_key = market_key
         rest_key = None
-        for rk in ("rest_of_match_1x2", "1x2_rest"):
-            if (rk, selection) in self.market_fair:
-                rest_key = rk
-                break
-        # Only calibrate 1x2 (full/1h/2h) using Rest-of-Match — same selection semantics
-        if rest_key and market_key in ("1x2", "1x2_1h", "1x2_2h"):
+        score_level = (
+            state.home.goals is not None
+            and state.away.goals is not None
+            and state.home.goals == state.away.goals
+        )
+        if market_key == "1x2" and score_level:
+            for rk in ("rest_of_match_1x2", "1x2_rest"):
+                if (rk, selection) in self.market_fair:
+                    rest_key = rk
+                    break
+        if rest_key:
             mkt_key = rest_key
 
         market_p = self.market_fair.get((mkt_key, selection))

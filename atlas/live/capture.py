@@ -158,10 +158,57 @@ class LiveCapture:
 
     # --- capture ---------------------------------------------------------
 
+    JS_HIDE_MEDIA = r"""
+    (() => {
+      // The 'SportyTV' media widget can expand over the scoreboard and hide
+      // the score and clock. Its 'Hide' control puts the scoreboard back.
+      const el = Array.from(document.querySelectorAll('*')).find(e =>
+        e.children.length === 0 && /^Hide$/i.test((e.textContent||'').trim()));
+      if (!el) return JSON.stringify({ok: false});
+      el.click();
+      return JSON.stringify({ok: true});
+    })()
+    """
+
+    def hide_media_overlay(self) -> bool:
+        """Collapse an expanded media widget that is covering the scoreboard."""
+        try:
+            raw = self._evaluate(self.JS_HIDE_MEDIA)
+        except CaptureError:
+            return False
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return bool(isinstance(data, dict) and data.get("ok"))
+
+    def read_scoreboard(self) -> dict:
+        """Read the live scoreboard from the DOM.
+
+        The scoreboard is not exposed in the accessibility tree, so the DOM is
+        the only place the score, the clock and the period exist. This is
+        the single most important read in the loop: without it the model
+        abstains on every selection.
+        """
+        from atlas.live.extract import extract_scoreboard_js
+
+        try:
+            raw = self._evaluate(extract_scoreboard_js())
+        except CaptureError:
+            return {}
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return {}
+            return data if isinstance(data, dict) else {}
+        return raw if isinstance(raw, dict) else {}
+
     def capture(self, wait: bool = True) -> CaptureResult:
         """Read the focused match panel, waiting until it is ready."""
         deadline = time.monotonic() + (self.max_wait_s if wait else 0.0)
         reason = "not captured"
+        media_hidden = False
         while True:
             try:
                 texts = self._snapshot_texts()
@@ -174,6 +221,20 @@ class LiveCapture:
 
             markets = extract_markets(texts, self.match_id)
             state = extract_live_match_state(texts, self.match_id)
+            # The DOM is authoritative for the scoreboard: the accessibility
+            # tree does not expose it.
+            board = self.read_scoreboard()
+            if board:
+                if board.get("home_goals") is not None:
+                    state.home.goals = board["home_goals"]
+                if board.get("away_goals") is not None:
+                    state.away.goals = board["away_goals"]
+                if board.get("clock_minute") is not None:
+                    state.clock_minute = board["clock_minute"]
+                if board.get("clock_label"):
+                    state.clock_label = board["clock_label"]
+                if board.get("period"):
+                    state.period = board["period"]
             raw_markets = [
                 {
                     "status": "open"
@@ -195,6 +256,17 @@ class LiveCapture:
                     match_id=self.match_id,
                 )
             reason = why
+            # If the scoreboard is missing but the media widget is expanded,
+            # collapse it once and try again.
+            if (
+                not media_hidden
+                and ("score unknown" in why or "clock unknown" in why)
+                and time.monotonic() < deadline
+            ):
+                media_hidden = self.hide_media_overlay()
+                if media_hidden:
+                    time.sleep(1.0)
+                    continue
             if time.monotonic() >= deadline:
                 return CaptureResult(
                     False,

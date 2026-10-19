@@ -656,7 +656,70 @@ def extract_clock_score(texts: list[str]) -> dict:
     score = extract_score_from_dom(texts)
     info["home_goals"] = score["home_goals"]
     info["away_goals"] = score["away_goals"]
+    if info["home_goals"] is None or info["away_goals"] is None:
+        # The book publishes the current score in its own market title
+        # ('Rest of the Match (current score 1:0)'), which is a reliable
+        # fallback when the scoreboard block itself is not rendered.
+        for t in texts:
+            m = re.search(r"current score (\d+)\s*:\s*(\d+)", t)
+            if m:
+                info["home_goals"] = int(m.group(1))
+                info["away_goals"] = int(m.group(2))
+                break
     return info
+
+
+def extract_scoreboard_js() -> str:
+    """Return JS source that reads the live scoreboard from the DOM.
+
+    The scoreboard is NOT exposed in the accessibility tree: the clock and
+    the period live in a single text node ('.m-result-title', e.g. "66' H2")
+    and the score in sibling '.m-value-1' elements. A snapshot therefore
+    yields the team names but not the score, the clock or the period, and
+    the model abstains on everything.
+
+    Reading the DOM directly is the only way to get them.
+    """
+    return r"""
+(() => {
+  const res = {
+    home_goals: null, away_goals: null,
+    clock_label: null, clock_minute: null, period: null
+  };
+  const detail = document.querySelector('.m-eventDetail')
+    || document.querySelector('.m-tracker') || document.body;
+  const titleEl = detail.querySelector('.m-result-title');
+  const title = titleEl ? (titleEl.innerText || '').trim() : '';
+  res.title_text = title;
+
+  // Clock: '66\'' or '66:12'
+  const cm = title.match(/(\d{1,3})(?::(\d{2}))?\s*['\u2019\u2032]?/);
+  if (cm) {
+    const mins = parseInt(cm[1], 10);
+    const secs = cm[2] ? parseInt(cm[2], 10) : 0;
+    res.clock_minute = mins + secs / 60.0;
+    res.clock_label = title;
+  }
+
+  // Period: 'H1', 'H2', 'HT', '1st Half', '2nd Half', 'FT'
+  const pm = title.match(/\b(H1|H2|HT|1ST|2ND|FULL\s*TIME|FT)\b/i);
+  if (pm) {
+    const t = pm[1].toUpperCase();
+    if (t === 'H1' || t === '1ST') res.period = '1h';
+    else if (t === 'H2' || t === '2ND') res.period = '2h';
+    else if (t === 'HT') res.period = 'ht';
+    else res.period = 'ft';
+  }
+
+  // Score: the two '.m-value-1' elements, home then away.
+  const vals = Array.from(detail.querySelectorAll('.m-value-1'))
+    .map(e => (e.innerText || '').trim())
+    .filter(v => /^\d{1,2}$/.test(v));
+  if (vals.length >= 1) res.home_goals = parseInt(vals[0], 10);
+  if (vals.length >= 2) res.away_goals = parseInt(vals[1], 10);
+  return JSON.stringify(res);
+})()
+"""
 
 
 def extract_score_clock_js() -> str:
