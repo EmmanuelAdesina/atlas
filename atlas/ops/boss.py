@@ -36,6 +36,13 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from atlas.live.decisions import PolicyConfig
+from atlas.ops.notify import Notifier
+from atlas.ops.posture import (
+    DEFAULT_POSTURE,
+    Posture,
+    posture_for_mode,
+    propose_posture,
+)
 from atlas.live.math_engine import fractional_kelly_stake
 from atlas.live.observe import LiveMatchState
 from atlas.ops.ledger import BetLedger, BetRecord, LedgerConfig
@@ -90,6 +97,7 @@ class Boss:
         policy: PolicyConfig,
         poll_interval_s: float = 20.0,
         decision_log_path: Optional[Union[str, Path]] = None,
+        notifier: Optional[Notifier] = None,
     ) -> None:
         self.ledger = ledger
         self.policy = policy
@@ -100,6 +108,60 @@ class Boss:
         self.decisions: list[dict] = []
         self._open_markets: dict[str, str] = {}
         self._match_reviews: dict[str, dict] = {}
+        self.posture: Posture = posture_for_mode(DEFAULT_POSTURE)
+        self.notifier: Optional[Notifier] = notifier
+        self.posture_history: list[dict] = []
+
+    # ------------------------------------------------------------------
+    # Operator control: posture and notifications
+    # ------------------------------------------------------------------
+
+    def interpret(
+        self,
+        instruction: str,
+        context: Optional[dict] = None,
+        use_llm: bool = False,
+    ) -> Posture:
+        """Turn an operator instruction into a validated posture.
+
+        The LLM (when configured) proposes; the deterministic layer validates
+        and clamps; the change is applied and announced.
+        """
+        proposed = propose_posture(instruction, context=context, use_llm=use_llm)
+        return self.apply_posture(proposed, instruction=instruction)
+
+    def apply_posture(
+        self, posture: Posture, instruction: str = ""
+    ) -> Posture:
+        """Adopt a posture, record it, and notify the operator."""
+        validated = posture.clamped()
+        self.posture = validated
+        entry = {
+            "posture": validated.to_dict(),
+            "instruction": instruction,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.posture_history.append(entry)
+        if self.notifier is not None:
+            if validated.clamps:
+                self.notifier.warn(
+                    "Posture clamped",
+                    f"{validated.describe()} (instruction: {instruction!r})",
+                    **entry,
+                )
+            else:
+                self.notifier.good(
+                    "Posture updated",
+                    validated.describe(),
+                    **entry,
+                )
+        return validated
+
+    def portfolio_config(self):
+        """The portfolio config that obeys the current posture."""
+        from atlas.portfolio.sequential import SequentialConfig
+
+        return self.posture.apply_to(SequentialConfig())
 
     # ------------------------------------------------------------------
     # Main decision loop (async, never blocks the fast pricing plane)

@@ -127,6 +127,12 @@ def cmd_live_demo(args: argparse.Namespace) -> int:
     match_id = fixture["match_id"]
     meta = fixture.get("meta", {})
     observed_at = datetime.fromisoformat(meta.get("observed_at", ""))
+
+    # The operator's posture decides the risk appetite for this snapshot.
+    posture = propose_posture(
+        args.instruction, use_llm=args.llm
+    ) if args.instruction else posture_for_mode(DEFAULT_POSTURE)
+    console.print(f"[bold]Posture:[/bold] {posture.describe()}")
     as_of = observed_at  # evaluate freshness as-of observation, not wall-clock
 
     for m in fixture.get("markets", []):
@@ -273,6 +279,12 @@ def cmd_boss(args: argparse.Namespace) -> int:
     match_id = fixture["match_id"]
     meta = fixture.get("meta", {})
     observed_at = datetime.fromisoformat(meta.get("observed_at", ""))
+
+    # The operator's posture decides the risk appetite for this snapshot.
+    posture = propose_posture(
+        args.instruction, use_llm=args.llm
+    ) if args.instruction else posture_for_mode(DEFAULT_POSTURE)
+    console.print(f"[bold]Posture:[/bold] {posture.describe()}")
     for m in fixture.get("markets", []):
         m.setdefault("match_id", match_id)
     records, skipped = map_sport_markets(
@@ -322,6 +334,61 @@ def cmd_boss(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_posture(args: argparse.Namespace) -> int:
+    """Steer the operating posture from an operator instruction.
+
+    The instruction is interpreted into a posture, the posture is clamped to
+    the hard invariants, and the result is what the portfolio will execute.
+    With --llm and a configured API key the interpretation is done by a
+    model; without one, the deterministic rule-based parser handles it.
+    """
+    from atlas.ops.notify import Notifier
+    from atlas.ops.posture import DEFAULT_POSTURE, posture_for_mode, propose_posture
+
+    notifier = Notifier(
+        log_path=args.audit_log,
+        webhook_url=args.webhook,
+        console=True,
+    )
+    context = {}
+    if args.fixture:
+        try:
+            fixture = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
+            context = {
+                "match_id": fixture.get("match_id"),
+                "markets": len(fixture.get("markets", [])),
+                "observed_at": fixture.get("meta", {}).get("observed_at"),
+            }
+        except (OSError, json.JSONDecodeError):
+            context = {}
+
+    posture = propose_posture(args.instruction, context=context, use_llm=args.llm)
+    console.print(f"[bold]Instruction:[/bold] {args.instruction!r}")
+    console.print(f"[bold]Posture:[/bold] {posture.describe()}")
+    console.print(f"[dim]source: {posture.source} | rationale: {posture.rationale}[/dim]")
+    if posture.clamps:
+        console.print(
+            f"[yellow]Clamped to hard invariants: {'; '.join(posture.clamps)}[/yellow]"
+        )
+
+    from atlas.portfolio.sequential import SequentialConfig
+
+    cfg = posture.apply_to(SequentialConfig())
+    console.print(
+        f"[bold]Portfolio now:[/bold] kelly {cfg.kelly_fraction:.2f}, "
+        f"exposure cap NGN {cfg.max_exposure_per_match:.0f}, "
+        f"{cfg.max_bets_per_snapshot} bet(s)/snapshot, "
+        f"EV floor {posture.min_ev:.3f}, "
+        f"max stake NGN {cfg.max_stake_per_bet:.0f}"
+    )
+    notifier.send(
+        "Posture set",
+        posture.describe(),
+        **posture.to_dict(),
+    )
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     """Full snapshot: price every open market, run the sequential portfolio,
     record accepted bets in the ledger (observe-only).
@@ -332,6 +399,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     """
     from atlas.live.loop import Opportunity
     from atlas.ops.ledger import BetLedger, LedgerConfig
+    from atlas.ops.posture import DEFAULT_POSTURE, posture_for_mode, propose_posture
     from atlas.portfolio.sequential import SequentialConfig, SequentialPortfolio
 
     try:
@@ -342,6 +410,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
     match_id = fixture["match_id"]
     meta = fixture.get("meta", {})
     observed_at = datetime.fromisoformat(meta.get("observed_at", ""))
+
+    # The operator's posture decides the risk appetite for this snapshot.
+    posture = propose_posture(
+        args.instruction, use_llm=args.llm
+    ) if args.instruction else posture_for_mode(DEFAULT_POSTURE)
+    console.print(f"[bold]Posture:[/bold] {posture.describe()}")
 
     ledger = BetLedger(
         LedgerConfig(daily_loss_limit=args.daily_loss_limit), log_path=args.ledger
@@ -407,11 +481,12 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 p_lower=est.p_lower,
                 p_push=est.p_push,
             )
-            if (opp.ev_lower or opp.ev) >= args.min_ev:
+            if (opp.ev_lower or opp.ev) >= max(args.min_ev, posture.min_ev):
                 opportunities.append(opp)
     console.print(
         f"{len(opportunities)} selections clear the conservative EV floor "
-        f"{args.min_ev:.2f} (of {sum(len(r.selections) for r in open_records)} open odds; "
+        f"{max(args.min_ev, posture.min_ev):.2f} (of "
+        f"{sum(len(r.selections) for r in open_records)} open odds; "
         f"{blocked} abstained/blocked)"
     )
 
@@ -449,7 +524,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "score": (state.home.goals, state.away.goals),
         "events": fixture.get("events", []),
     }
-    portfolio = SequentialPortfolio(SequentialConfig())
+    portfolio = SequentialPortfolio(posture.apply_to(SequentialConfig()))
     decisions = portfolio.evaluate_snapshot(opportunities, match_state, prior_bets)
 
     table = Table("market", "selection", "odds", "EV", "stake", "action", "reason")
@@ -466,6 +541,33 @@ def cmd_plan(args: argparse.Namespace) -> int:
     console.print(table)
 
     accepted = [d for d in decisions if d.should_bet and not stop_active]
+
+    if posture.require_guaranteed_profit:
+        # Superedge-only: only legs of a sure-thing covering set may be staked.
+        arb_legs = {
+            (d.opportunity.market_key, d.opportunity.selection)
+            for arb in arbs
+            for d in decisions
+            if d.opportunity.market_key == arb.family
+        }
+        arb_names = {
+            (d.opportunity.market_key, d.opportunity.selection)
+            for arb in arbs
+            for name, _ in arb.legs
+            for d in decisions
+            if d.opportunity.selection == name
+        }
+        allowed = arb_legs | arb_names
+        before = len(accepted)
+        accepted = [
+            d for d in accepted
+            if (d.opportunity.market_key, d.opportunity.selection) in allowed
+        ]
+        if before != len(accepted):
+            console.print(
+                f"[dim]Superedge-only posture: dropped {before - len(accepted)} "
+                f"bet(s) that are not part of a guaranteed-profit set.[/dim]"
+            )
     for d in accepted:
         bet_id = f"{match_id}:{d.opportunity.market_key}:{d.opportunity.selection}"
         ok = ledger.record_pending(
@@ -562,6 +664,17 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--ledger", default="data/ops/ledger.jsonl", help="Ledger JSONL path")
     plan.add_argument("--min-ev", type=float, default=0.05, help="EV floor")
     plan.add_argument(
+        "--instruction",
+        default=None,
+        help="Operator instruction that sets the posture for this snapshot "
+             "(e.g. 'low risk and more revenue')",
+    )
+    plan.add_argument(
+        "--llm",
+        action="store_true",
+        help="Use the LLM proposer for --instruction (needs ATLAS_BOSS_API_KEY)",
+    )
+    plan.add_argument(
         "--min-arb-edge",
         type=float,
         default=0.005,
@@ -574,6 +687,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Hard daily stop in NGN (default: -500)",
     )
     plan.set_defaults(func=cmd_plan)
+
+    posture_cmd = sub.add_parser(
+        "posture",
+        help="Interpret an operator instruction into a validated operating posture",
+    )
+    posture_cmd.add_argument("instruction", help="e.g. 'more revenue and low risk'")
+    posture_cmd.add_argument("--fixture", help="Optional fixture for context")
+    posture_cmd.add_argument(
+        "--llm",
+        action="store_true",
+        help="Use the LLM proposer (needs ATLAS_BOSS_API_KEY); falls back to rules",
+    )
+    posture_cmd.add_argument(
+        "--audit-log",
+        default="data/decisions/notifications.jsonl",
+        help="Notification audit log path",
+    )
+    posture_cmd.add_argument(
+        "--webhook",
+        default=None,
+        help="Optional webhook for custom notifications (or ATLAS_WEBHOOK_URL)",
+    )
+    posture_cmd.set_defaults(func=cmd_posture)
     return p
 
 

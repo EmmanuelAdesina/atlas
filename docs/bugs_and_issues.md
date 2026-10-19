@@ -70,6 +70,31 @@ Also still unpriced: corners, cards and player markets (the board's Corners /
 Bookings / Players / Teams / Minutes tabs). These need per-event intensities
 the current model does not carry.
 
+### Operator control (the "LLM Boss")
+
+The name was a misnomer: the Boss shipped with zero LLM calls. It now has a
+real slow plane with a clear division of labour.
+
+- `atlas/ops/posture.py` — the `Posture` object (mode, EV floor, Kelly
+  fraction, exposure cap, bets per snapshot, per-bet stake cap,
+  `require_guaranteed_profit`). The LLM **proposes**; `Posture.clamped()`
+  **validates** against hard invariants and records what it changed; the
+  portfolio **executes** deterministically. An LLM can never set a
+  probability or a stake.
+- Two proposers: `RuleBasedProposer` (default, deterministic, no API key)
+  and `LLMProposer` (OpenAI-compatible, `ATLAS_BOSS_API_KEY` /
+  `ATLAS_BOSS_BASE_URL` / `ATLAS_BOSS_MODEL`). A model failure or an
+  unparseable reply degrades to the rule-based parse, never to an error.
+- `atlas/ops/notify.py` — custom notifications to the console, a JSONL audit
+  log and an optional webhook. A failing sink never breaks the loop.
+- `atlas.main posture "..."` interprets an instruction; `atlas.main plan
+  --instruction "..."` runs a snapshot under that posture. The
+  superedge-only posture refuses any bet that is not part of a guaranteed
+  profit set.
+- The posture only moves the risk-appetite levers. The correlation caps,
+  rebalance thresholds and cooldowns are deliberately out of its reach:
+  those protect the operator regardless of appetite.
+
 ### Architecture Decisions
 
 - **R2 = DOM scraping** (not external API). No API key needed. Statistics tab scraper built.
