@@ -7,6 +7,7 @@ deficit, manufacturing a +5.3 EV phantom edge at 47.00.
 """
 
 import pytest
+from datetime import datetime, timezone
 
 from atlas.live.estimate import LiveStateSpaceModel
 from atlas.live.extract import extract_clock_score, extract_score_from_dom
@@ -148,3 +149,73 @@ def test_1up_leading_side_is_already_won():
     state = _state(2, 0)
     p = _prob("1x2_1up", "Home", state)
     assert p == pytest.approx(1.0)
+
+
+# --- Readiness gate ------------------------------------------------------
+
+def test_panel_is_not_ready_without_a_live_period():
+    from atlas.live.extract import panel_is_ready
+
+    state = LiveMatchState(
+        match_id="m1",
+        home=TeamStats(name="A", goals=0),
+        away=TeamStats(name="B", goals=0),
+        period="unknown",
+        clock_minute=70.0,
+        observed_at=datetime.now(timezone.utc),
+        source="test",
+    )
+    ready, reason = panel_is_ready(state, [{"status": "open"}] * 10)
+    assert ready is False
+    assert "period" in reason
+
+
+def test_panel_is_not_ready_without_a_score():
+    from atlas.live.extract import panel_is_ready
+
+    state = LiveMatchState(
+        match_id="m1",
+        home=TeamStats(name="A"),
+        away=TeamStats(name="B", goals=0),
+        period="2h",
+        clock_minute=70.0,
+        observed_at=datetime.now(timezone.utc),
+        source="test",
+    )
+    ready, reason = panel_is_ready(state, [{"status": "open"}] * 10)
+    assert ready is False
+    assert "score" in reason
+
+
+def test_panel_is_not_ready_without_enough_markets():
+    from atlas.live.extract import panel_is_ready
+
+    state = LiveMatchState(
+        match_id="m1",
+        home=TeamStats(name="A", goals=1),
+        away=TeamStats(name="B", goals=0),
+        period="2h",
+        clock_minute=70.0,
+        observed_at=datetime.now(timezone.utc),
+        source="test",
+    )
+    ready, reason = panel_is_ready(state, [{"status": "open"}] * 3, min_markets=8)
+    assert ready is False
+    assert "market" in reason
+
+
+def test_panel_is_ready_when_complete():
+    from atlas.live.extract import panel_is_ready
+
+    state = LiveMatchState(
+        match_id="m1",
+        home=TeamStats(name="A", goals=1),
+        away=TeamStats(name="B", goals=0),
+        period="2h",
+        clock_minute=70.0,
+        observed_at=datetime.now(timezone.utc),
+        source="test",
+    )
+    ready, reason = panel_is_ready(state, [{"status": "open"}] * 20)
+    assert ready is True
+    assert reason == "ready"

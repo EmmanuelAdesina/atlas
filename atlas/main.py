@@ -397,6 +397,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     daily stop, so re-running this command against the same ledger reflects
     real operational state.
     """
+    from atlas.live.extract import panel_is_ready
     from atlas.live.loop import Opportunity
     from atlas.ops.ledger import BetLedger, LedgerConfig
     from atlas.ops.posture import DEFAULT_POSTURE, posture_for_mode, propose_posture
@@ -454,6 +455,23 @@ def cmd_plan(args: argparse.Namespace) -> int:
         f"{len(records)} mapped, {len(open_records)} open, "
         f"{len(skipped)} suspended/skipped"
     )
+
+    # Readiness gate: never act on a half-rendered board.
+    raw_markets = [
+        {
+            "status": "open" if len(r.selections) >= 2 else "suspended",
+        }
+        for r in records
+    ]
+    ready, why = panel_is_ready(state, raw_markets, min_markets=args.min_markets)
+    if not ready and not args.force:
+        console.print(
+            f"[yellow]Panel not ready ({why}). Nothing is planned. "
+            f"Use --force to plan anyway.[/yellow]"
+        )
+        return 0
+    if not ready:
+        console.print(f"[yellow]Panel not ready ({why}) but --force was given.[/yellow]")
 
     model = LiveStateSpaceModel(now=observed_at)
     # Market-implied (Shin de-vigged) probabilities, used for calibration and
@@ -663,6 +681,18 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--fixture", required=True, help="Recorded observation JSON")
     plan.add_argument("--ledger", default="data/ops/ledger.jsonl", help="Ledger JSONL path")
     plan.add_argument("--min-ev", type=float, default=0.05, help="EV floor")
+    plan.add_argument(
+        "--force",
+        action="store_true",
+        help="Plan even if the panel readiness gate fails",
+    )
+    plan.add_argument(
+        "--min-markets",
+        type=int,
+        default=1,
+        help="Minimum open markets for the panel to count as ready "
+             "(a live board shows dozens)",
+    )
     plan.add_argument(
         "--instruction",
         default=None,

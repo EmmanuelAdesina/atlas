@@ -1026,6 +1026,44 @@ def extract_stats_js() -> str:
 """
 
 
+def panel_is_ready(
+    state: LiveMatchState,
+    markets: list[dict],
+    min_markets: int = 1,
+) -> tuple[bool, str]:
+    """Is the match panel fully rendered enough to price?
+
+    The live board renders progressively: a snapshot taken too early carries
+    the match header but not yet the score, the clock or the market table.
+    Acting on such a snapshot means pricing against a missing score, which
+    the model handles by abstaining — but it also means the loop can make a
+    decision from half a board.
+
+    The gate requires, in order of importance:
+      1. a known live period (the model abstains without one),
+      2. a known score (both sides),
+      3. a known clock,
+      4. a minimum number of open markets (`min_markets`). A live board
+         renders dozens; a caller that knows the expected board size can
+         raise this to catch a panel that is still filling in.
+
+    Returns (ready, reason). The reason says which condition failed.
+    """
+    if state.period not in ("1h", "2h", "ht"):
+        return (False, f"period not live (got {state.period!r})")
+    if state.home.goals is None or state.away.goals is None:
+        return (False, "score unknown")
+    if state.clock_minute is None:
+        return (False, "clock unknown")
+    open_markets = [m for m in markets if m.get("status") == "open"]
+    if len(open_markets) < min_markets:
+        return (
+            False,
+            f"only {len(open_markets)} open markets (need {min_markets})",
+        )
+    return (True, "ready")
+
+
 def extract_live_match_state(
     texts: list[str],
     match_id: str,
