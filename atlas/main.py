@@ -31,6 +31,7 @@ from atlas.live.boss import BossController, diagnose_live_operation
 from atlas.live.calibration import grade_decisions
 from atlas.live.decisions import DecisionLog, DecisionRecord, PolicyConfig
 from atlas.live.estimate import (
+    CalibratedModel,
     LiveStateSpaceModel,
     MarketModel,
     NoMoreGoalsBaseline,
@@ -381,11 +382,20 @@ def cmd_plan(args: argparse.Namespace) -> int:
     )
 
     model = LiveStateSpaceModel(now=observed_at)
+    # Market-implied (Shin de-vigged) probabilities, used for calibration and
+    # for the 5pp model-market gap guard that blocks fake edges.
+    market_fair: dict[tuple[str, str], float] = {}
+    for r in open_records:
+        market_fair.update({(r.market_key, k): v for k, v in r.fair_probs("shin").items()})
+    calibrated = CalibratedModel(base_model=model, market_fair=market_fair)
+
     opportunities: list[Opportunity] = []
+    blocked = 0
     for r in open_records:
         for s in r.selections:
-            est = model.estimate(state, r.market_key, s.name)
+            est = calibrated.estimate(state, r.market_key, s.name)
             if est.abstained or est.p is None:
+                blocked += 1
                 continue
             opp = Opportunity(
                 match_id=match_id,
@@ -401,7 +411,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 opportunities.append(opp)
     console.print(
         f"{len(opportunities)} selections clear the conservative EV floor "
-        f"{args.min_ev:.2f} (of {sum(len(r.selections) for r in open_records)} open odds)"
+        f"{args.min_ev:.2f} (of {sum(len(r.selections) for r in open_records)} open odds; "
+        f"{blocked} abstained/blocked)"
     )
 
     match_state = {

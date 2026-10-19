@@ -40,6 +40,25 @@ _PERIOD_TOKENS: tuple[tuple[str, str], ...] = (
     ("1st Half", "1h"),
 )
 
+# The live match header renders a bare period label ('2nd', '1st', 'HT')
+# immediately before the clock, without the word 'Half'. These are only read
+# inside the header window around the clock, never from the whole page.
+_PERIOD_ALIASES: dict[str, str] = {
+    "1st": "1h",
+    "1st half": "1h",
+    "first half": "1h",
+    "2nd": "2h",
+    "2nd half": "2h",
+    "second half": "2h",
+    "ht": "ht",
+    "half time": "ht",
+    "halftime": "ht",
+    "ft": "ft",
+    "ended": "ft",
+    "full time": "ft",
+}
+_PERIOD_WINDOW = 3
+
 _TABS_ROW = {"All", "Main", "Goals", "Half", "Bookings", "Corners", "Specials", "Players"}
 _END_MARKERS = {"Betslip", "Cashout"}
 
@@ -319,26 +338,96 @@ def _maybe_set_ou_line(market: dict, selection: str, odds: Optional[float] = Non
             market["line"] = float(m.group(2))
 
 
+def _match_panel_start(texts: list[str]) -> int:
+    """Index of the '<Home> vs <Away>' header of the viewed match.
+
+    The live board renders every match card with its own clock and score, so
+    extraction must anchor on the panel of the match actually being viewed.
+    """
+    for i, t in enumerate(texts):
+        if " vs " in t and len(t) < 80:
+            return i
+    return 0
+
+
+def _clock_span(texts: list[str], start: int = 0) -> Optional[tuple[int, int]]:
+    """Index span of the match clock in the text list.
+
+    SportyBet renders the clock either as one token ('75:11', '90:00 +03:42')
+    or split across three tokens ('73', ':', '52'). Both must be recognised,
+    because a split clock looks exactly like a score.
+    """
+    for i in range(start, len(texts)):
+        if _CLOCK_RE.match(texts[i]) or _CLOCK_PLUS_RE.match(texts[i]):
+            return (i, i + 1)
+    for i in range(start, len(texts) - 2):
+        a, b, c = texts[i], texts[i + 1], texts[i + 2]
+        if b != ":" or not a.isdigit() or not c.isdigit():
+            continue
+        # A split clock has minutes 0..120 and seconds 0..59.
+        if int(a) <= 120 and int(c) <= 59:
+            return (i, i + 3)
+    return None
+
+
+def _score_candidates(texts: list[str]) -> list[tuple[int, int, int]]:
+    """All (index, home, away) score readings, single-token and split."""
+    cands: list[tuple[int, int, int]] = []
+    for i, t in enumerate(texts):
+        sm = _SCORE_RE.match(t)
+        if sm:
+            cands.append((i, int(sm.group(1)), int(sm.group(2))))
+    for i in range(len(texts) - 2):
+        a, b, c = texts[i], texts[i + 1], texts[i + 2]
+        if b == ":" and a.isdigit() and c.isdigit():
+            cands.append((i, int(a), int(c)))
+    return cands
+
+
+# A football score never reaches this; the clock (and stray numbers) do.
+_MAX_PLAUSIBLE_GOALS = 25
+
+
 def extract_score_from_dom(texts: list[str]) -> dict:
     """Extract the live score from the scoreboard region of the snapshot texts.
 
     SportyBet renders the score either as one token ('2:1', '2 : 1') or as three
     consecutive tokens ('2', ':', '1'). The HT/FT split scores use the same
     encoding, so the first match is the current score.
+
+    The clock uses the same encoding, so the reading is anchored on the clock
+    position: the score follows the clock in the match header. Without that
+    anchor a split clock ('73', ':', '52') is read as a 73-2 score.
     """
     info: dict = {"home_goals": None, "away_goals": None}
     board = [t.strip() for t in texts if t.strip()]
-    for t in board:
-        sm = _SCORE_RE.match(t)
-        if sm:
-            info["home_goals"] = int(sm.group(1))
-            info["away_goals"] = int(sm.group(2))
+    cands = _score_candidates(board)
+    if not cands:
+        return info
+
+    panel = _match_panel_start(board)
+    span = _clock_span(board, panel)
+    if span is not None:
+        clock_end = span[1]
+        after = [c for c in cands if c[0] >= clock_end]
+        # The score sits immediately after the clock in the header block.
+        for c in after:
+            if c[0] - clock_end <= 4:
+                info["home_goals"], info["away_goals"] = c[1], c[2]
+                return info
+        # Otherwise take the first plausible reading just after the clock.
+        for c in after:
+            if c[0] - clock_end <= 12 and c[1] <= _MAX_PLAUSIBLE_GOALS and c[2] <= _MAX_PLAUSIBLE_GOALS:
+                info["home_goals"], info["away_goals"] = c[1], c[2]
+                return info
+
+    # No clock anchor: take the first plausible reading, else the first reading.
+    for c in cands:
+        if c[1] <= _MAX_PLAUSIBLE_GOALS and c[2] <= _MAX_PLAUSIBLE_GOALS:
+            info["home_goals"], info["away_goals"] = c[1], c[2]
             return info
-    for a, b, c in zip(board, board[1:], board[2:]):
-        if b == ":" and a.isdigit() and c.isdigit():
-            info["home_goals"] = int(a)
-            info["away_goals"] = int(c)
-            return info
+    c = cands[0]
+    info["home_goals"], info["away_goals"] = c[1], c[2]
     return info
 
 
@@ -358,7 +447,20 @@ def extract_clock_score(texts: list[str]) -> dict:
         if token in texts:
             info["period"] = period
             break
-    for t in texts:
+    panel = _match_panel_start(texts)
+    # A bare period label ('2nd', '1st') is only trusted next to the clock:
+    # it sits immediately before it, separated by at most a '|' separator.
+    if info["period"] is None:
+        span = _clock_span(texts, panel)
+        if span is not None:
+            lo = max(0, span[0] - _PERIOD_WINDOW)
+            for t in texts[lo:span[0]]:
+                alias = _PERIOD_ALIASES.get(t.strip().lower())
+                if alias is not None:
+                    info["period"] = alias
+                    break
+    for i in range(panel, len(texts)):
+        t = texts[i]
         cm = _CLOCK_RE.match(t)
         if cm and info["clock_label"] is None:
             base_m, base_s = int(cm.group(1)), int(cm.group(2))
@@ -380,6 +482,14 @@ def extract_clock_score(texts: list[str]) -> dict:
             info["clock_minute"] = base + stoppage
             info["clock_label"] = t
             break
+    else:
+        # A split clock ('73', ':', '52') is read as minutes:seconds.
+        span = _clock_span(texts, panel)
+        if span is not None and span[1] - span[0] == 3:
+            i = span[0]
+            mins, secs = int(texts[i]), int(texts[i + 2])
+            info["clock_minute"] = mins + secs / 60.0
+            info["clock_label"] = f"{mins}:{secs:02d}"
     score = extract_score_from_dom(texts)
     info["home_goals"] = score["home_goals"]
     info["away_goals"] = score["away_goals"]

@@ -38,6 +38,20 @@
 | R2 | Statistics tab scraper | Built but needs live validation. May break if SportyBet changes CSS. |
 | B14 | Sub-ms pricing test | **Fixed.** The assertion demanded ~95us/selection (2ms for 21 selections) — ~4x below what this class of machine delivers, so it could never pass here. It now asserts the actual architectural claim: sub-millisecond **per selection** (measured: ~420us/selection cold, ~200us/selection warm), plus a machine-independent cache-effectiveness test that compares two timings measured in the same run and fails only if the joint surface stops being cached (verified failing when the cache is disabled). |
 
+### Found by running against the live board (2026-10-19)
+
+| # | Issue | Status |
+|---|-------|--------|
+| B24 | 1UP/2UP pricing ignored the scoreline deficit (`d >= 1` instead of `d >= 1 - base_diff`), so a side 0-2 down at 84' read as ~13% to lead by 1 — a phantom EV **+5.31 at odds 47.00**. Live-money hazard. | **Fixed** (offset applied; end-of-game difference is a conservative lower bound on "led by N at any time"). Regression test added. |
+| B25 | The live header renders a bare period label (`2nd`), not `2nd Half`. Unreadable period → `is_live` false → **all 128 selections abstained** on a live match. | **Fixed** (bare labels read only within 3 tokens of the clock). |
+| B26 | The score was read as the clock. SportyBet renders the clock as `('73', ':', '52')` on some matches and `('75:11')` on others; the split form was parsed as a 73-2 score. | **Fixed** (clock-anchored, panel-scoped, plausibility-bounded). |
+| B27 | `navigate()` to the live board always times out (the page never fires `load` — websocket polling) and the tab is then not registered, so every later command 502s. | **Open.** Workaround: load a light page, then navigate client-side via `location.href`; hard-reload to repopulate the board. The production loop must never call `navigate()` on the live board. |
+| B28 | The `snapshot` action 502s on the live board (accessibility tree of 45+ matches). | **Open.** Extraction must use targeted `evaluate` JS, not snapshots. |
+| B29 | Pricer coverage is **1.9% of a live board**: 20 of 92 market headers, 53 of 2,794 odds. Uncovered: clean sheet, win-to-nil, exact goals, odd/even, goals-in-a-row, lead-by-N-at-any-time, team O/U, 3-way handicap, 1X2-from-minute-N, total goals, correct score, corners/cards/player markets. | **Open.** Largest single gap between the model and the book. |
+| B30 | No cashout support of any kind (no code path, no math). SportyBet exposes Cashout in the live betslip, including partial cashout on losing live positions. | **Open.** Needs its own model: cashout value vs the portfolio's live EV. |
+| B31 | No bet submission layer. The WebBridge `click` primitive exists but nothing clicks odds; `atlas.main plan` is observe-only. | **Open.** Nothing can be placed until this exists. |
+| B32 | The `plan` path used the raw `LiveStateSpaceModel`, bypassing the calibration layer and its 5pp model-market gap guard that exists to block fake edges. | **Fixed** (plan now uses `CalibratedModel`). |
+
 ### Architecture Decisions
 
 - **R2 = DOM scraping** (not external API). No API key needed. Statistics tab scraper built.

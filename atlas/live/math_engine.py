@@ -767,28 +767,24 @@ def price_from_joint_matrix(
             return None
         base_diff = base[0] - base[1]
         _, p_draw, _ = outcome_probs_from_base(base[0], base[1])
-        if mkey == "1x2_1up":
-            p_home = (
-                1.0
-                if base_diff >= 1
-                else sum(p for d, p in marg.diff_pmf.items() if d >= 1)
-            )
-            p_away = (
-                1.0
-                if base_diff <= -1
-                else sum(p for d, p in marg.diff_pmf.items() if d <= -1)
-            )
-        else:  # 1x2_2up
-            p_home = (
-                1.0
-                if base_diff >= 2
-                else sum(p for d, p in marg.diff_pmf.items() if d >= 2)
-            )
-            p_away = (
-                1.0
-                if base_diff <= -2
-                else sum(p for d, p in marg.diff_pmf.items() if d <= -2)
-            )
+        # '1UP'/'2UP' settle as a WIN the moment the side leads by N+ goals at
+        # any time, so the remaining-goal difference must OVERCOME the current
+        # deficit: Home leads by 1 only if the remaining diff reaches
+        # 1 - base_diff. Summing the raw remaining diff (d >= 1) ignores the
+        # deficit and manufactures large false edges on losing sides.
+        # The end-of-game difference is a lower bound on 'led by N at any
+        # time', so this stays conservative.
+        need = 1 if mkey == "1x2_1up" else 2
+        if base_diff >= need:
+            p_home = 1.0
+        else:
+            threshold = need - base_diff
+            p_home = sum(p for d, p in marg.diff_pmf.items() if d >= threshold)
+        if base_diff <= -need:
+            p_away = 1.0
+        else:
+            threshold = need + base_diff
+            p_away = sum(p for d, p in marg.diff_pmf.items() if d <= -threshold)
         if sel in ("Home", "1"):
             return SelectionProbabilityOutcome(p_win=p_home)
         if sel in ("Draw", "X"):
