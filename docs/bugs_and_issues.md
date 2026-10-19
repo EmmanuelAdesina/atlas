@@ -19,7 +19,7 @@
 | B11 | Red card stoppage not time-weighted | Weighted by (90-card_min)/90 |
 | B12 | Matrix truncation max_goals=8 | Raised to 10 |
 | B13 | Network capture filter case-sensitive | Documented. Using DOM scraping instead. |
-| B14 | Sub-ms pricing test machine-dependent | Documented. Not a logic bug. |
+| B14 | Sub-ms pricing test machine-dependent | Fixed: assert sub-ms **per selection** + cache-effectiveness |
 | B15 | Correct Score header shows current score | Documented. Not a bug. |
 | B16 | HT state crashes model | Added "ht" to is_live |
 | B17 | 1x2_rest unpriced | Added to pricer |
@@ -36,7 +36,7 @@
 |---|-------|---------------|
 | B2 | Session expiry | Session-health check in polling loop. How long does your session last? |
 | R2 | Statistics tab scraper | Built but needs live validation. May break if SportyBet changes CSS. |
-| B14 | Sub-ms pricing test | Fix test (warm surface before timing) or leave for PR author. |
+| B14 | Sub-ms pricing test | **Fixed.** The assertion demanded ~95us/selection (2ms for 21 selections) — ~4x below what this class of machine delivers, so it could never pass here. It now asserts the actual architectural claim: sub-millisecond **per selection** (measured: ~420us/selection cold, ~200us/selection warm), plus a machine-independent cache-effectiveness test that compares two timings measured in the same run and fails only if the joint surface stops being cached (verified failing when the cache is disabled). |
 
 ### Architecture Decisions
 
