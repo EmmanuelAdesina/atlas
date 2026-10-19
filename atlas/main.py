@@ -389,6 +389,72 @@ def cmd_posture(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run(args: argparse.Namespace) -> int:
+    """Run the autonomous live loop.
+
+    capture -> readiness -> price -> posture -> plan -> place -> record -> settle
+
+    Money moves only when --submit is given; the loop is observe-only by
+    default, which is how it should be run until it has been trusted.
+    """
+    from atlas.browser.betslip import BetslipDriver
+    from atlas.browser.webbridge import WebBridgeAdapter
+    from atlas.live.capture import LiveCapture
+    from atlas.live.runner import LiveRunner
+    from atlas.ops.ledger import BetLedger, LedgerConfig
+    from atlas.ops.notify import Notifier
+    from atlas.ops.posture import propose_posture
+
+    adapter = WebBridgeAdapter(session=args.session)
+    capture = LiveCapture(
+        adapter,
+        min_markets=args.min_markets,
+        max_wait_s=args.max_wait,
+    )
+    ledger = BetLedger(
+        LedgerConfig(daily_loss_limit=args.daily_loss_limit), log_path=args.ledger
+    )
+    notifier = Notifier(
+        log_path=args.notifications,
+        webhook_url=args.webhook,
+        console=True,
+    )
+    posture = propose_posture(args.instruction, use_llm=args.llm) if args.instruction else None
+    betslip = BetslipDriver(adapter, allow_submit=args.submit)
+    runner = LiveRunner(
+        capture=capture,
+        ledger=ledger,
+        notifier=notifier,
+        betslip=betslip,
+        posture=posture,
+        cycle_s=args.cycle_seconds,
+        allow_submission=args.submit,
+        state_path=args.state,
+    )
+    runner.load_state()
+    console.print(
+        f"[bold]Atlas live loop[/bold] | session {args.session} | "
+        f"ledger {args.ledger} | submission "
+        f"[{'ENABLED' if args.submit else 'OFF (observe only)'}]"
+    )
+    console.print(f"Posture: {runner.posture.describe()}")
+    if args.dashboard:
+        from atlas.live.control import serve
+
+        console.print(
+            f"[cyan]Control dashboard on http://{args.host}:{args.port}[/cyan]"
+        )
+        serve(runner, host=args.host, port=args.port, notifier=notifier)
+        return 0
+    try:
+        runner.run_forever(max_cycles=args.cycles)
+    except KeyboardInterrupt:
+        console.print("[yellow]loop interrupted[/yellow]")
+    for report in runner.reports[-10:]:
+        console.print(report.describe())
+    return 0
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     """Full snapshot: price every open market, run the sequential portfolio,
     record accepted bets in the ledger (observe-only).
@@ -740,6 +806,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional webhook for custom notifications (or ATLAS_WEBHOOK_URL)",
     )
     posture_cmd.set_defaults(func=cmd_posture)
+
+    run = sub.add_parser(
+        "run",
+        help="Run the autonomous live loop (capture -> price -> plan -> place -> settle)",
+    )
+    run.add_argument("--session", default="atlas-live", help="WebBridge session")
+    run.add_argument("--ledger", default="data/ops/ledger.jsonl", help="Ledger JSONL path")
+    run.add_argument(
+        "--daily-loss-limit", type=float, default=-500.0, help="Hard daily stop (NGN)"
+    )
+    run.add_argument(
+        "--instruction", default=None, help="Initial posture instruction"
+    )
+    run.add_argument(
+        "--llm", action="store_true", help="Use the LLM proposer for --instruction"
+    )
+    run.add_argument(
+        "--submit",
+        action="store_true",
+        help="ACTUALLY PLACE BETS (off by default: the loop is observe-only)",
+    )
+    run.add_argument(
+        "--cycles", type=int, default=None, help="Stop after N cycles (default: run forever)"
+    )
+    run.add_argument(
+        "--cycle-seconds", type=float, default=30.0, help="Seconds between cycles"
+    )
+    run.add_argument(
+        "--min-markets", type=int, default=10, help="Minimum open markets for a ready panel"
+    )
+    run.add_argument(
+        "--max-wait", type=float, default=90.0, help="Seconds to wait for a ready panel"
+    )
+    run.add_argument(
+        "--notifications",
+        default="data/decisions/notifications.jsonl",
+        help="Notification audit log path",
+    )
+    run.add_argument("--webhook", default=None, help="Optional notification webhook")
+    run.add_argument(
+        "--state", default="data/ops/state.json", help="Persisted posture path"
+    )
+    run.add_argument(
+        "--dashboard", action="store_true", help="Serve the control dashboard instead of looping"
+    )
+    run.add_argument("--host", default="127.0.0.1", help="Dashboard host")
+    run.add_argument("--port", type=int, default=8077, help="Dashboard port")
+    run.set_defaults(func=cmd_run)
     return p
 
 
