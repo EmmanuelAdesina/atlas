@@ -631,16 +631,24 @@ class SelectionProbabilityOutcome:
 
 
 _HANDICAP_KEY_RE = re.compile(r"^handicap_(\d+)_(\d+)$")
-_AH_KEY_RE = re.compile(r"^(?:ah|asian_handicap)_([+-]?\d+(?:[._]\d+)?)$")
-_OU_KEY_RE = re.compile(r"^(ou|ou_1h|ou_2h|home_ou|away_ou)_(\d+(?:_\d+)?)$")
+_AH_KEY_RE = re.compile(
+    r"^(?:ah|asian_handicap)(_2h|_1h)?_([+-]?\d+(?:[._]\d+)?)$"
+)
+_OU_KEY_RE = re.compile(
+    r"^(ou|ou_1h|ou_2h|home_ou|away_ou|home_ou_2h|away_ou_2h)_(\d+(?:_\d+)?)$"
+)
 # Path-based families: 'lead_by_2_any' | 'lead_by_1_home' | 'goals_in_row_3_away'
 _PATH_KEY_RE = re.compile(r"^(lead_by|goals_in_row)_(\d+)_(any|home|away)$")
+# Time-windowed markets: '1x2_to_85', 'ou_to_85'
+_WINDOW_KEY_RE = re.compile(r"^(1x2|ou)_to_(\d+)$")
 
 
 def is_path_market(market_key: str) -> bool:
     """True for the 'at any time' families that need the path model."""
     return _PATH_KEY_RE.match(market_key.strip().lower()) is not None
 _SELECTION_LINE_RE = re.compile(r"\(([+-]?\d+(?:\.\d+)?)\)")
+# An O/U line written plainly in the selection text, e.g. 'Over 2.5'.
+_OU_SELECTION_LINE_RE = re.compile(r"^(?:Over|Under)\s+(\d+(?:\.\d+)?)$", re.IGNORECASE)
 _SELECTION_EURO_HCP_RE = re.compile(r"\((\d+):(\d+)\)")
 
 
@@ -852,7 +860,13 @@ def price_from_joint_matrix(
     if ou_m:
         prefix = ou_m.group(1)
         line = float(ou_m.group(2).replace("_", "."))
-        scope = "1h" if prefix == "ou_1h" else "2h" if prefix == "ou_2h" else "full"
+        scope = (
+            "1h"
+            if prefix == "ou_1h"
+            else "2h"
+            if prefix in ("ou_2h", "home_ou_2h", "away_ou_2h")
+            else "full"
+        )
         base = period_base_scores(scope)
         if base is None:
             return None
@@ -863,10 +877,10 @@ def price_from_joint_matrix(
         if not (is_over or is_under):
             return None
 
-        if prefix == "home_ou":
+        if prefix in ("home_ou", "home_ou_2h"):
             pmf = marg.home_pmf
             base_g = bh
-        elif prefix == "away_ou":
+        elif prefix in ("away_ou", "away_ou_2h"):
             pmf = marg.away_pmf
             base_g = ba
         else:
@@ -967,10 +981,54 @@ def price_from_joint_matrix(
         return None
 
     # 8. 2-Way Asian Handicap ('ah_0.5', 'ah_-0.25', etc.)
+    #    The line-less variants ('2nd Half - Asian Handicap') carry their
+    #    line in the selection text instead of the market title.
     ah_m = _AH_KEY_RE.match(mkey)
+    if ah_m is None and mkey in ("ah_pending", "ah_2h_pending", "asian_handicap"):
+        ah_m = None
+        sel_line_probe = _SELECTION_LINE_RE.search(sel)
+        if sel_line_probe is None:
+            return None
+        raw_line = float(sel_line_probe.group(1))
+        is_home = sel.startswith("Home")
+        is_away = sel.startswith("Away")
+        if not (is_home or is_away):
+            return None
+        scope = "2h" if mkey.endswith("_2h") else "full"
+        base_scores = period_base_scores(scope)
+        if base_scores is None:
+            return None
+        bh, ba = base_scores
+        frac = round(abs(raw_line) - math.floor(abs(raw_line)), 2)
+        sub_lines = (
+            [raw_line - 0.25, raw_line + 0.25] if frac in (0.25, 0.75) else [raw_line]
+        )
+        p_win = p_push = p_hw = p_hl = 0.0
+        for d, cell_p in marg.diff_pmf.items():
+            diff = float((bh - ba) + (d if is_home else -d))
+            if len(sub_lines) == 1:
+                w, push = _grade_single_asian_line(diff, sub_lines[0])
+                p_win += cell_p * w
+                p_push += cell_p * push
+            else:
+                w1, push1 = _grade_single_asian_line(diff, sub_lines[0])
+                w2, push2 = _grade_single_asian_line(diff, sub_lines[1])
+                if w1 == 1.0 and w2 == 1.0:
+                    p_win += cell_p
+                elif (w1 == 1.0 and push2 == 1.0) or (push1 == 1.0 and w2 == 1.0):
+                    p_hw += cell_p
+                elif (w1 == 0.0 and push1 == 0.0 and w2 == 1.0) or (
+                    push1 == 1.0 and w2 == 0.0 and push2 == 0.0
+                ):
+                    p_hl += cell_p
+                elif push1 == 1.0 and push2 == 1.0:
+                    p_push += cell_p
+        return SelectionProbabilityOutcome(
+            p_win=p_win, p_push=p_push, p_half_win=p_hw, p_half_loss=p_hl
+        )
     if ah_m:
         sel_line_m = _SELECTION_LINE_RE.search(sel)
-        raw_line = float(ah_m.group(1).replace("_", "."))
+        raw_line = float(ah_m.group(2).replace("_", "."))
         is_home = sel.startswith("Home")
         is_away = sel.startswith("Away")
         if not (is_home or is_away):
@@ -991,7 +1049,12 @@ def price_from_joint_matrix(
         p_push = 0.0
         p_hw = 0.0
         p_hl = 0.0
-        base_diff = (cur_h - cur_a) if is_home else (cur_a - cur_h)
+        # A second-half handicap is graded on the second half alone.
+        ah_scope = "1h" if "1h" in mkey else "2h" if "2h" in mkey else "full"
+        ah_base = period_base_scores(ah_scope)
+        if ah_base is None:
+            return None
+        base_diff = (ah_base[0] - ah_base[1]) if is_home else (ah_base[1] - ah_base[0])
         for d, cell_p in marg.diff_pmf.items():
             diff = float(base_diff + (d if is_home else -d))
             if len(sub_lines) == 1:
@@ -1052,16 +1115,31 @@ def price_from_joint_matrix(
         return SelectionProbabilityOutcome(p_win=p_yes if is_yes else p_no)
 
     # 10. Total-goals parity ('odd_even', 'home_odd_even', 'away_odd_even')
-    if mkey in ("odd_even", "home_odd_even", "away_odd_even"):
-        if mkey == "odd_even":
-            pmf = marg.tot_pmf
-            base_g = 0
-        elif mkey == "home_odd_even":
+    #     and their period-scoped variants ('odd_even_2h', ...)
+    if mkey in (
+        "odd_even",
+        "home_odd_even",
+        "away_odd_even",
+        "odd_even_1h",
+        "odd_even_2h",
+        "home_odd_even_1h",
+        "home_odd_even_2h",
+        "away_odd_even_1h",
+        "away_odd_even_2h",
+    ):
+        scope = "1h" if "_1h" in mkey else "2h" if "_2h" in mkey else "full"
+        base_scores = period_base_scores(scope)
+        if base_scores is None:
+            return None
+        if mkey.startswith("home_"):
             pmf = marg.home_pmf
-            base_g = cur_h
-        else:
+            base_g = base_scores[0]
+        elif mkey.startswith("away_"):
             pmf = marg.away_pmf
-            base_g = cur_a
+            base_g = base_scores[1]
+        else:
+            pmf = marg.tot_pmf
+            base_g = base_scores[0] + base_scores[1]
         want_odd = sel.strip().lower().startswith("odd")
         want_even = sel.strip().lower().startswith("even")
         if not (want_odd or want_even):
@@ -1072,6 +1150,49 @@ def price_from_joint_matrix(
             if (total % 2 == 1) == want_odd:
                 p_win += cell_p
         return SelectionProbabilityOutcome(p_win=p_win)
+
+    # 10b. Both teams to score 2+ ('btts_2plus', 'gg_ng_2')
+    if mkey in ("btts_2plus", "gg_ng_2", "btts_2plus_2h", "gg_ng_2_2h"):
+        scope = "2h" if mkey.endswith("_2h") else "full"
+        base_scores = period_base_scores(scope)
+        if base_scores is None:
+            return None
+        bh, ba = base_scores
+        n_rows = len(mat)
+        p_yes = 0.0
+        for i in range(n_rows):
+            row = mat[i]
+            for j in range(len(row)):
+                cell = row[j]
+                if cell <= 0.0:
+                    continue
+                if bh + i >= 2 and ba + j >= 2:
+                    p_yes += cell
+        want_yes = sel.strip().lower() in ("yes", "1")
+        if not want_yes and sel.strip().lower() not in ("no", "2"):
+            return None
+        return SelectionProbabilityOutcome(p_win=p_yes if want_yes else 1.0 - p_yes)
+
+    # 10c. Both teams to score AND no draw ('btts_no_draw')
+    if mkey in ("btts_no_draw", "gg_ng_no_draw"):
+        base_scores = period_base_scores("full")
+        if base_scores is None:
+            return None
+        bh, ba = base_scores
+        n_rows = len(mat)
+        p_yes = 0.0
+        for i in range(n_rows):
+            row = mat[i]
+            for j in range(len(row)):
+                cell = row[j]
+                if cell <= 0.0:
+                    continue
+                if bh + i > 0 and ba + j > 0 and (bh + i) != (ba + j):
+                    p_yes += cell
+        want_yes = sel.strip().lower() in ("yes", "1")
+        if not want_yes and sel.strip().lower() not in ("no", "2"):
+            return None
+        return SelectionProbabilityOutcome(p_win=p_yes if want_yes else 1.0 - p_yes)
 
     # 11. Clean Sheet ('home_clean_sheet', 'away_clean_sheet')
     if mkey in ("home_clean_sheet", "away_clean_sheet"):
@@ -1148,7 +1269,141 @@ def price_from_joint_matrix(
             return None
         return SelectionProbabilityOutcome(p_win=mat[rem_h][rem_a])
 
-    # 15. Combination markets ('combo_1x2__ou_1_5', 'combo_ou_2_5__btts', ...)
+    # 15. Rest-of-match variants ('rest_of_match_total_goals')
+    #     'Rest of Match Total Goals (current score 0:0)' counts the goals
+    #     scored FROM NOW, so the base is zero, not the current score.
+    if mkey == "rest_of_match_total_goals":
+        m = _OU_SELECTION_LINE_RE.match(sel.strip())
+        if m is None:
+            return None
+        line = float(m.group(1))
+        is_over = sel.strip().lower().startswith("over")
+        is_under = sel.strip().lower().startswith("under")
+        if not (is_over or is_under):
+            return None
+        p_win = 0.0
+        for k, cell_p in enumerate(marg.tot_pmf):
+            if (is_over and k > line) or (is_under and k < line):
+                p_win += cell_p
+        return SelectionProbabilityOutcome(p_win=p_win)
+
+    # 15b. Rest-of-match Asian handicap
+    #     'Rest of Match Asian Handicap (current score 0:0)' is graded on the
+    #     goals scored FROM NOW, so the base difference is zero.
+    if mkey == "rest_of_match_asian_handicap":
+        m = re.search(r"\(([+-]?\d+(?:\.\d+)?)\)", sel)
+        if m is None:
+            return None
+        raw_line = float(m.group(1))
+        is_home = sel.startswith("Home")
+        is_away = sel.startswith("Away")
+        if not (is_home or is_away):
+            return None
+        frac = round(abs(raw_line) - math.floor(abs(raw_line)), 2)
+        sub_lines = (
+            [raw_line - 0.25, raw_line + 0.25] if frac in (0.25, 0.75) else [raw_line]
+        )
+        p_win = p_push = p_hw = p_hl = 0.0
+        for d, cell_p in marg.diff_pmf.items():
+            diff = float(d if is_home else -d)
+            if len(sub_lines) == 1:
+                w, push = _grade_single_asian_line(diff, sub_lines[0])
+                p_win += cell_p * w
+                p_push += cell_p * push
+            else:
+                w1, push1 = _grade_single_asian_line(diff, sub_lines[0])
+                w2, push2 = _grade_single_asian_line(diff, sub_lines[1])
+                if w1 == 1.0 and w2 == 1.0:
+                    p_win += cell_p
+                elif (w1 == 1.0 and push2 == 1.0) or (push1 == 1.0 and w2 == 1.0):
+                    p_hw += cell_p
+                elif (w1 == 0.0 and push1 == 0.0 and w2 == 1.0) or (
+                    push1 == 1.0 and w2 == 0.0 and push2 == 0.0
+                ):
+                    p_hl += cell_p
+                elif push1 == 1.0 and push2 == 1.0:
+                    p_push += cell_p
+        return SelectionProbabilityOutcome(
+            p_win=p_win, p_push=p_push, p_half_win=p_hw, p_half_loss=p_hl
+        )
+
+    # 16. Time-windowed markets ('1x2_to_85', 'ou_to_85')
+    #     '1X2 from 1 to 85 minute' settles on the state of the match AT
+    #     minute 85: the goals already scored plus the goals scored in the
+    #     window that is still to come. The window intensity is the
+    #     remaining intensity scaled by the share of the remaining time the
+    #     window covers.
+    window_m = _WINDOW_KEY_RE.match(mkey)
+    if window_m:
+        kind = window_m.group(1)
+        until = int(window_m.group(2))
+        clock = state.clock_minute
+        if clock is None:
+            return None
+        if clock >= until:
+            # The window has closed: the outcome is already known.
+            return None
+        rem = estimate_remaining_minutes(state, period_scope="full").rem_mean
+        if rem <= 0:
+            return None
+        window_minutes = min(until, clock + rem) - clock
+        if window_minutes <= 0:
+            return None
+        share = window_minutes / rem
+        w_mu_h = mu_home * share
+        w_mu_a = mu_away * share
+        w_mat = build_remaining_score_matrix(
+            w_mu_h, w_mu_a, max_goals=len(mat) - 1
+        )
+        w_marg = compute_matrix_marginals(w_mat)
+        # The state at the end of the window: the goals already scored plus
+        # the goals scored inside the window.
+        bh, ba = cur_h, cur_a
+        if kind == "1x2":
+            p_h = p_d = p_a = 0.0
+            for i in range(len(w_mat)):
+                for j in range(len(w_mat[i])):
+                    cell = w_mat[i][j]
+                    if cell <= 0.0:
+                        continue
+                    diff = (bh + i) - (ba + j)
+                    if diff > 0:
+                        p_h += cell
+                    elif diff == 0:
+                        p_d += cell
+                    else:
+                        p_a += cell
+            if sel in ("Home", "1"):
+                return SelectionProbabilityOutcome(p_win=p_h)
+            if sel in ("Draw", "X"):
+                return SelectionProbabilityOutcome(p_win=p_d)
+            if sel in ("Away", "2"):
+                return SelectionProbabilityOutcome(p_win=p_a)
+            return None
+        # 'ou_to_85': the total goals inside the window (the goals already
+        # scored are before minute 1 of the window's start, so they are
+        # included by the book's convention: the total of the match at that
+        # minute).
+        m = _OU_SELECTION_LINE_RE.match(sel.strip())
+        if m is None:
+            return None
+        line = float(m.group(1))
+        is_over = sel.strip().lower().startswith("over")
+        is_under = sel.strip().lower().startswith("under")
+        if not (is_over or is_under):
+            return None
+        p_win = 0.0
+        for i in range(len(w_mat)):
+            for j in range(len(w_mat[i])):
+                cell = w_mat[i][j]
+                if cell <= 0.0:
+                    continue
+                total = (bh + ba) + i + j
+                if (is_over and total > line) or (is_under and total < line):
+                    p_win += cell
+        return SelectionProbabilityOutcome(p_win=p_win)
+
+    # 17. Combination markets ('combo_1x2__ou_1_5', 'combo_ou_2_5__btts', ...)
     # A combination such as '1X2 & Over/Under 1.5' settles on the JOINT
     # outcome, so its probability is NOT the product of the two marginals.
     # It is read straight off the joint matrix, which is exactly where a

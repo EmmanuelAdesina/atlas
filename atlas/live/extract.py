@@ -85,6 +85,7 @@ _HEADER_PATTERNS: list[tuple[re.Pattern, Any]] = [
     (re.compile(r"^(?:\d+(?:st|nd|rd|th)|Next) Goal$"), ("next_goal", None, "full")),
     (re.compile(r"^Handicap (\d+:\d+)$"), ("handicap", None, "full")),
     (re.compile(r"^Asian Handicap ([+-]?\d+(?:\.\d+)?)$"), ("asian_handicap", None, "full")),
+    (re.compile(r"^2nd Half - Asian Handicap$"), ("ah_2h_pending", None, "2h")),
     (re.compile(r"^2nd Half - 1X2$"), ("1x2_2h", None, "2h")),
     (re.compile(r"^1st Half - 1X2$"), ("1x2_1h", None, "1h")),
     (re.compile(r"^2nd Half - Over/Under$"), (None, None, "2h")),
@@ -113,7 +114,14 @@ _HEADER_PATTERNS: list[tuple[re.Pattern, Any]] = [
     (re.compile(r"^Home Team Goals$"), ("home_exact_goals", None, "full")),
     (re.compile(r"^Away Team Goals$"), ("away_exact_goals", None, "full")),
     (re.compile(r"^Correct Score"), ("correct_score", None, "full")),
-    (re.compile(r"^2nd Half - Odd/Even$"), ("odd_even", None, "2h")),
+    (re.compile(r"^2nd Half - Odd/Even$"), ("odd_even_2h", None, "2h")),
+    (re.compile(r"^2nd Half Home Team Total Goals Odd or Even$"),
+     ("home_odd_even_2h", None, "2h")),
+    (re.compile(r"^2nd Half Away Team Total Goals Odd or Even$"),
+     ("away_odd_even_2h", None, "2h")),
+    (re.compile(r"^(?:GG/NG|No Draw Both Teams To Score) 2\+$"), ("btts_2plus", None, "full")),
+    (re.compile(r"^No Draw Both Teams To Score$"), ("btts_no_draw", None, "full")),
+    (re.compile(r"^2nd Half - GG/NG 2\+$"), ("btts_2plus_2h", None, "2h")),
     (re.compile(r"^2nd Half - Home Team Clean Sheet$"), ("home_clean_sheet", None, "2h")),
     (re.compile(r"^2nd Half - Away Team Clean Sheet$"), ("away_clean_sheet", None, "2h")),
     (re.compile(r"^2nd Half Home Team to Win to Nil$"), ("home_win_to_nil", None, "2h")),
@@ -122,14 +130,33 @@ _HEADER_PATTERNS: list[tuple[re.Pattern, Any]] = [
     # --- Combination markets (joint outcomes, priced off the joint matrix) ---
     (re.compile(r"^1X2 & Over/Under (\d+(?:\.\d+)?)$"), ("combo_1x2__ou_{line}", None, "full")),
     (re.compile(r"^1X2 & GG/NG$"), ("combo_1x2__btts", None, "full")),
-    (re.compile(r"^Over/Under (\d+(?:\.\d+)?) & GG/NG$"), ("combo_ou_{line}__btts", None, "full")),
     (re.compile(r"^Over/Under & GG/NG$"), ("combo_ou_2_5__btts", None, "full")),
-    (re.compile(r"^Double Chance & Total Goals$"), ("combo_double_chance__ou_1_5", None, "full")),
+    (re.compile(r"^Double Chance & Over/Under (\d+(?:\.\d+)?)$"),
+     ("combo_double_chance__ou_{line}", None, "full")),
     (re.compile(r"^Double Chance & GG/NG$"), ("combo_double_chance__btts", None, "full")),
-    (re.compile(r"^2nd Half - Double Chance & Total Goals$"), ("combo_2h_double_chance__ou_1_5", None, "2h")),
-    (re.compile(r"^2nd Half - Double Chance & GG/NG$"), ("combo_2h_double_chance__btts", None, "2h")),
-    (re.compile(r"^2nd Half - 1X2 Over/Under (\d+(?:\.\d+)?)$"), ("combo_1x2_2h__ou_{line}", None, "2h")),
-    (re.compile(r"^2nd Half - 1X2 GG/NG$"), ("combo_1x2_2h__btts", None, "2h")),
+    (re.compile(r"^2nd Half - 1X2 & Over/Under (\d+(?:\.\d+)?)$"),
+     ("combo_1x2_2h__ou_{line}", None, "2h")),
+    (re.compile(r"^2nd Half - 1X2 & GG/NG$"), ("combo_1x2_2h__btts", None, "2h")),
+    (re.compile(r"^2nd Half - Double Chance & Total Goals$"),
+     ("combo_2h_double_chance__ou_1_5", None, "2h")),
+    (re.compile(r"^2nd Half Double Chance & Total Goals$"),
+     ("combo_2h_double_chance__ou_1_5", None, "2h")),
+    (re.compile(r"^2nd Half - Double Chance & GG/NG$"),
+     ("combo_2h_double_chance__btts", None, "2h")),
+    (re.compile(r"^2nd Half - Double Chance & Over/Under (\d+(?:\.\d+)?)$"),
+     ("combo_2h_double_chance__ou_{line}", None, "2h")),
+    # --- Rest-of-match variants (the current score is in the title) ---
+    (re.compile(r"^Rest of Match Total Goals \(current score \d+:\d+\)$"),
+     ("rest_of_match_total_goals", None, "full")),
+    (re.compile(r"^Rest of Match Asian Handicap \(current score \d+:\d+\)$"),
+     ("rest_of_match_asian_handicap", None, "full")),
+    # --- Time-windowed markets (the state of the match at a given minute) ---
+    (re.compile(r"^1X2 from 1 to (\d+) minute$"), ("1x2_to_{n}", None, "full")),
+    (re.compile(r"^Total Goals Over/Under from 1 to (\d+) minute$"),
+     ("ou_to_{n}", None, "full")),
+    # --- No-draw variants ---
+    (re.compile(r"^No Draw Both Teams To Score(?: Yes/No)?$"),
+     ("btts_no_draw", None, "full")),
 ]
 
 _OU_SELECTION_RE = re.compile(r"^(Over|Under)\s+(\d+(?:\.\d+)?)$")
@@ -208,16 +235,22 @@ def _team_over_under_key(label: str, home_team: str, away_team: str) -> Optional
 
     The live board titles these markets with the team name ('Beitar
     Jerusalem FC Over/Under'), so the side can only be identified against
-    the match's own team names.
+    the match's own team names. The second-half variants keep their scope.
     """
-    m = _TEAM_OU_RE.match(label.strip())
+    scope = "full"
+    title = label.strip()
+    if title.lower().startswith("2nd half"):
+        scope = "2h"
+        title = title[len("2nd Half") :].lstrip(" -")
+    m = _TEAM_OU_RE.match(title)
     if not m:
         return None
     team = m.group("team").strip()
+    suffix = "_2h" if scope == "2h" else ""
     if home_team and team.lower() == home_team.strip().lower():
-        return "home_ou_pending"
+        return f"home_ou{suffix}_pending"
     if away_team and team.lower() == away_team.strip().lower():
-        return "away_ou_pending"
+        return f"away_ou{suffix}_pending"
     return None
 
 
@@ -409,12 +442,16 @@ def extract_markets(texts: list[str], match_id: str) -> list[dict]:
 
 
 def _maybe_set_ou_line(market: dict, selection: str, odds: Optional[float] = None) -> None:
-    if market["market_label"] in (
-        "Over/Under",
-        "2nd Half - Over/Under",
-        "1st Half - Over/Under",
-        "Home Team Over/Under",
-        "Away Team Over/Under",
+    label = market["market_label"]
+    if (
+        label in (
+            "Over/Under",
+            "2nd Half - Over/Under",
+            "1st Half - Over/Under",
+            "Home Team Over/Under",
+            "Away Team Over/Under",
+        )
+        or label.endswith("Over/Under")
     ):
         m = _OU_SELECTION_RE.match(selection)
         if m and market.get("line") is None:

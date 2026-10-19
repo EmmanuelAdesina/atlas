@@ -65,21 +65,49 @@ REPRESENTATIVE_SELECTION = {
     "combo_ou_2_5__btts": "Over & Yes",
     "combo_double_chance__ou_1_5": "Home or Draw & Over",
     "combo_double_chance__btts": "Home or Draw & Yes",
+    "combo_1x2_2h__ou_1_5": "Home & Over",
+    "combo_1x2_2h__btts": "Home & Yes",
+    "combo_2h_double_chance__ou_1_5": "Home or Draw & Over",
+    "combo_2h_double_chance__btts": "Home or Draw & Yes",
+    "btts_2plus": "Yes",
+    "btts_no_draw": "Yes",
+    "odd_even_2h": "Odd",
+    "home_odd_even_2h": "Odd",
+    "away_odd_even_2h": "Odd",
+    "rest_of_match_total_goals": "Over 2.5",
+    "rest_of_match_asian_handicap": "Home (-0.5)",
+    "1x2_to_85": "Home",
+    "1x2_to_80": "Home",
+    "1x2_to_75": "Home",
+    "ou_to_85": "Over 2.5",
+    "ou_to_80": "Over 2.5",
+    "ou_to_75": "Over 2.5",
 }
 
 
 def _resolve(title: str):
-    """Market key for a live board title, the way the extractor builds it."""
+    """Market key for a live board title, the way the extractor builds it.
+
+    The extractor resolves the line from the selection text for the
+    families whose title has no line ('Over/Under', 'Home Team Over/Under'),
+    so those placeholders are resolved here too. The captured board has no
+    selection names, so a representative line is used.
+    """
     hdr = _match_header(title)
+    key = None
     if hdr is not None:
         key = hdr[0]
-        if key:
-            return key
-        # A bare 'Over/Under' takes its line from the selection text.
-        if title.strip() == "Over/Under":
-            return "ou_2_5"
-        return None
-    return _team_over_under_key(title, HOME_TEAM, AWAY_TEAM)
+        if not key:
+            # A bare 'Over/Under' takes its line from the selection text.
+            if title.strip() == "Over/Under":
+                key = "ou_2_5"
+            elif title.strip() == "2nd Half - Over/Under":
+                key = "ou_2h_2_5"
+    else:
+        key = _team_over_under_key(title, HOME_TEAM, AWAY_TEAM)
+    if key and key.endswith("_pending"):
+        key = key[: -len("_pending")] + "_2_5"
+    return key
 
 
 def _representative(key: str | None):
@@ -87,9 +115,11 @@ def _representative(key: str | None):
         return None
     if key in REPRESENTATIVE_SELECTION:
         return REPRESENTATIVE_SELECTION[key]
-    if key.startswith("ou_") or key in ("home_ou_pending", "away_ou_pending"):
+    if key.startswith("ou_") or "ou_pending" in key or "ou_2h" in key:
         return "Over 2.5"
-    if key.startswith("ah_"):
+    if key.startswith("home_ou") or key.startswith("away_ou"):
+        return "Over 2.5"
+    if key.startswith("ah_") or key.endswith("ah_pending"):
         return "Home (-0.5)"
     if key.startswith("handicap_"):
         parts = key.split("_")
@@ -99,7 +129,8 @@ def _representative(key: str | None):
     if key.startswith("combo_"):
         comp_a, comp_b = key[len("combo_"):].split("__")
         first = {
-            "1x2": "Home", "double_chance": "Home or Draw", "2h_double_chance": "Home or Draw",
+            "1x2": "Home", "double_chance": "Home or Draw",
+            "2h_double_chance": "Home or Draw", "1x2_2h": "Home",
         }.get(comp_a)
         if first is None and comp_a.startswith("ou_"):
             first = "Over"
@@ -159,7 +190,7 @@ def test_pricer_covers_most_of_a_live_board(board, pricing_env):
             priced_odds += n
 
     coverage = priced_odds / total_odds
-    assert coverage >= 0.65, (
+    assert coverage >= 0.95, (
         f"live-board coverage fell to {coverage:.1%} "
         f"({priced_odds}/{total_odds} odds) — the pricer lost reach"
     )
