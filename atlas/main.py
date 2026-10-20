@@ -398,7 +398,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     default, which is how it should be run until it has been trusted.
     """
     from atlas.browser.betslip import BetslipDriver
+    from atlas.browser.cashout import CashoutDriver
     from atlas.browser.webbridge import WebBridgeAdapter
+    from atlas.live.decisions import PolicyConfig
     from atlas.live.capture import LiveCapture
     from atlas.live.runner import LiveRunner
     from atlas.ops.ledger import BetLedger, LedgerConfig
@@ -421,15 +423,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     posture = propose_posture(args.instruction, use_llm=args.llm) if args.instruction else None
     betslip = BetslipDriver(adapter, allow_submit=args.submit)
+    # The cashout driver is only armed with --submit: a cashout moves money
+    # exactly like a bet does.
+    cashout_driver = CashoutDriver(adapter, allow_execute=args.submit)
+    # The policy gate is the LAST word on execution. --submit is the only
+    # thing that turns it on, and it stays off by default.
+    policy = PolicyConfig(
+        allow_execution=args.submit,
+        bankroll_ngn=args.bankroll,
+    )
     runner = LiveRunner(
         capture=capture,
         ledger=ledger,
         notifier=notifier,
         betslip=betslip,
+        cashout_driver=cashout_driver,
         posture=posture,
+        policy=policy,
         cycle_s=args.cycle_seconds,
         allow_submission=args.submit,
         state_path=args.state,
+        decision_log_path=args.decision_log,
     )
     runner.load_state()
     console.print(
@@ -446,6 +460,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         serve(runner, host=args.host, port=args.port, notifier=notifier)
         return 0
+    if not args.submit:
+        console.print(
+            "[yellow]Submission is OFF. The loop will plan but not place. "
+            "Use --submit to arm execution.[/yellow]"
+        )
     try:
         runner.run_forever(max_cycles=args.cycles)
     except KeyboardInterrupt:
@@ -849,10 +868,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--state", default="data/ops/state.json", help="Persisted posture path"
     )
     run.add_argument(
+        "--bankroll",
+        type=float,
+        default=100_000.0,
+        help="Bankroll the stakes are sized against (NGN). Set this to the "
+             "real account balance: the gap guard plus a 0.10 Kelly fraction "
+             "cannot justify a NGN 100 minimum bet on a small bankroll.",
+    )
+    run.add_argument(
+        "--decision-log",
+        default="data/decisions/loop_decisions.jsonl",
+        help="Where every cycle's decisions are logged",
+    )
+    run.add_argument(
         "--dashboard", action="store_true", help="Serve the control dashboard instead of looping"
     )
-    run.add_argument("--host", default="127.0.0.1", help="Dashboard host")
-    run.add_argument("--port", type=int, default=8077, help="Dashboard port")
+    run.add_argument(
+        "--host",
+        default=None,
+        help="Dashboard bind address (default: ATLAS_HOST, else 127.0.0.1)",
+    )
+    run.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Dashboard port (default: ATLAS_PORT, else 8077)",
+    )
     run.set_defaults(func=cmd_run)
     return p
 

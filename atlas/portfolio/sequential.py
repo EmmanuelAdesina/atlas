@@ -49,6 +49,11 @@ _MATCH_CLOCK_EVENT_MIN = 5.0
 @dataclass
 class SequentialConfig:
     kelly_fraction: float = 0.10
+    # The bankroll the stake is sized against. It must be the REAL balance:
+    # with a 10,000 bankroll, a 0.10 Kelly fraction and the 5pp model-market
+    # gap guard, the largest stake the guard can justify is about NGN 50 —
+    # below the NGN 100 minimum, so the system would never place a bet.
+    bankroll_ngn: float = 10_000.0
     min_stake_ngn: float = 100.0
     max_stake_per_bet: float = 1000.0
     max_exposure_per_match: float = 3000.0
@@ -69,6 +74,13 @@ class SequentialDecision:
     should_bet: bool
     reason: str
     factor_counts: dict[str, int]
+    # The same vocabulary the DecisionLog uses, so one decision log can hold
+    # both the sequential and the single-shot decisions.
+    decision: str = "pass"
+
+    def __post_init__(self) -> None:
+        if not self.decision or self.decision == "pass":
+            self.decision = "recommend" if self.should_bet else "pass"
 
 
 def _parse_ts(value: Any) -> Optional[datetime]:
@@ -224,7 +236,7 @@ class SequentialPortfolio:
             min_stake_ngn=cfg.min_stake_ngn,
             max_stake_per_bet=cfg.max_stake_per_bet,
             max_exposure_per_match=cfg.max_exposure_per_match,
-            bankroll_ngn=_BANKROLL_NGN,
+            bankroll_ngn=cfg.bankroll_ngn,
             kelly_fraction=cfg.kelly_fraction,
         )
 

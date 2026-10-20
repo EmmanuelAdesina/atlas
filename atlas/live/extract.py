@@ -414,6 +414,11 @@ def extract_markets(texts: list[str], match_id: str) -> list[dict]:
         i += 1
     flush()
 
+    return _post_process_markets(markets)
+
+
+def _post_process_markets(markets: list[dict]) -> list[dict]:
+    """Shared post-processing for the snapshot and DOM market paths."""
     # Drop non-market blocks (Teams/Minutes/Match sub-tabs row etc.)
     cleaned = [
         m
@@ -434,6 +439,9 @@ def extract_markets(texts: list[str], match_id: str) -> list[dict]:
                 "dnb",
                 "btts",
                 "rest_of_match",
+                "corners_",
+                "combo_",
+                "excluded_",
                 "other_",
             )
         )
@@ -449,16 +457,18 @@ def extract_markets(texts: list[str], match_id: str) -> list[dict]:
             "1st Half - Over/Under",
             "Home Team Over/Under",
             "Away Team Over/Under",
-        ):
+        ) or label.endswith("Over/Under"):
             if m.get("line") is not None:
                 if label == "Home Team Over/Under":
                     prefix = "home_ou"
                 elif label == "Away Team Over/Under":
                     prefix = "away_ou"
+                elif "2nd Half" in label:
+                    prefix = "ou_2h"
+                elif "1st Half" in label:
+                    prefix = "ou_1h"
                 else:
-                    prefix = {"full": "ou", "2h": "ou_2h", "1h": "ou_1h"}[
-                        m.get("period") or "full"
-                    ]
+                    prefix = "ou"
                 line_txt = ("%g" % m["line"]).replace(".", "_")
                 m["market_key"] = f"{prefix}_{line_txt}"
     # Post-process corner keys: the line is in the selection text too.
@@ -672,13 +682,17 @@ def extract_clock_score(texts: list[str]) -> dict:
 def extract_scoreboard_js() -> str:
     """Return JS source that reads the live scoreboard from the DOM.
 
-    The scoreboard is NOT exposed in the accessibility tree: the clock and
-    the period live in a single text node ('.m-result-title', e.g. "66' H2")
-    and the score in sibling '.m-value-1' elements. A snapshot therefore
-    yields the team names but not the score, the clock or the period, and
-    the model abstains on everything.
+    The scoreboard is NOT exposed in the accessibility tree, and it has two
+    layouts:
 
-    Reading the DOM directly is the only way to get them.
+      - the inline panel: the clock and period in one text node
+        ('.m-result-title', e.g. "66' H2") and the score in sibling
+        '.m-value-1' elements;
+      - a dedicated match page: the clock ('88:50'), the period ('2nd') and
+        the score ('1 : 1') as plain text after the '<Home> vs <Away>'
+        header.
+
+    Both are read here, the class-based one first.
     """
     return r"""
 (() => {
@@ -686,37 +700,82 @@ def extract_scoreboard_js() -> str:
     home_goals: null, away_goals: null,
     clock_label: null, clock_minute: null, period: null
   };
+
+  // --- layout 1: the inline panel ---------------------------------------
   const detail = document.querySelector('.m-eventDetail')
     || document.querySelector('.m-tracker') || document.body;
   const titleEl = detail.querySelector('.m-result-title');
   const title = titleEl ? (titleEl.innerText || '').trim() : '';
-  res.title_text = title;
-
-  // Clock: '66\'' or '66:12'
-  const cm = title.match(/(\d{1,3})(?::(\d{2}))?\s*['\u2019\u2032]?/);
-  if (cm) {
-    const mins = parseInt(cm[1], 10);
-    const secs = cm[2] ? parseInt(cm[2], 10) : 0;
-    res.clock_minute = mins + secs / 60.0;
-    res.clock_label = title;
+  if (title) {
+    const cm = title.match(/(\d{1,3})(?::(\d{2}))?\s*['\u2019\u2032]?/);
+    if (cm) {
+      const mins = parseInt(cm[1], 10);
+      const secs = cm[2] ? parseInt(cm[2], 10) : 0;
+      res.clock_minute = mins + secs / 60.0;
+      res.clock_label = title;
+    }
+    const pm = title.match(/\b(H1|H2|HT|1ST|2ND|FULL\s*TIME|FT)\b/i);
+    if (pm) {
+      const t = pm[1].toUpperCase();
+      if (t === 'H1' || t === '1ST') res.period = '1h';
+      else if (t === 'H2' || t === '2ND') res.period = '2h';
+      else if (t === 'HT') res.period = 'ht';
+      else res.period = 'ft';
+    }
+    const vals = Array.from(detail.querySelectorAll('.m-value-1'))
+      .map(e => (e.innerText || '').trim())
+      .filter(v => /^\d{1,2}$/.test(v));
+    if (vals.length >= 1) res.home_goals = parseInt(vals[0], 10);
+    if (vals.length >= 2) res.away_goals = parseInt(vals[1], 10);
   }
 
-  // Period: 'H1', 'H2', 'HT', '1st Half', '2nd Half', 'FT'
-  const pm = title.match(/\b(H1|H2|HT|1ST|2ND|FULL\s*TIME|FT)\b/i);
-  if (pm) {
-    const t = pm[1].toUpperCase();
-    if (t === 'H1' || t === '1ST') res.period = '1h';
-    else if (t === 'H2' || t === '2ND') res.period = '2h';
-    else if (t === 'HT') res.period = 'ht';
-    else res.period = 'ft';
+  // --- layout 2: a dedicated match page ---------------------------------
+  if (res.home_goals === null || res.clock_minute === null) {
+    let header = null;
+    document.querySelectorAll('*').forEach(e => {
+      if (!header && e.children.length === 0 && / vs /.test(e.textContent || '')
+          && (e.textContent || '').length < 80) header = e;
+    });
+    if (header) {
+      let block = header.parentElement;
+      for (let i = 0; i < 3 && block; i++) {
+        const txt = (block.innerText || '').replace(/\u00a0/g, ' ');
+        if (txt && /\d/.test(txt)) {
+          const clock = txt.match(/(\d{1,3}):(\d{2})/);
+          if (clock && res.clock_minute === null) {
+            res.clock_minute = parseInt(clock[1], 10) + parseInt(clock[2], 10) / 60.0;
+            res.clock_label = clock[0];
+          }
+          const pm = txt.match(/\b(1st|2nd|HT|FT|Full Time)\b/i);
+          if (pm && !res.period) {
+            const t = pm[1].toLowerCase();
+            if (t === '1st') res.period = '1h';
+            else if (t === '2nd') res.period = '2h';
+            else if (t === 'ht') res.period = 'ht';
+            else res.period = 'ft';
+          }
+          // The score is spaced ('1 : 1'); the clock is not ('88:50'). The
+          // clock matches the loose pattern first, so every candidate is
+          // checked and the first plausible SCORE is taken.
+          if (res.home_goals === null) {
+            const re = /(\d{1,2})\s*:\s*(\d{1,2})/g;
+            let m;
+            while ((m = re.exec(txt)) !== null) {
+              const h = parseInt(m[1], 10);
+              const a = parseInt(m[2], 10);
+              if (h <= 25 && a <= 25) {
+                res.home_goals = h;
+                res.away_goals = a;
+                break;
+              }
+            }
+          }
+          if (res.home_goals !== null && res.clock_minute !== null) break;
+        }
+        block = block.parentElement;
+      }
+    }
   }
-
-  // Score: the two '.m-value-1' elements, home then away.
-  const vals = Array.from(detail.querySelectorAll('.m-value-1'))
-    .map(e => (e.innerText || '').trim())
-    .filter(v => /^\d{1,2}$/.test(v));
-  if (vals.length >= 1) res.home_goals = parseInt(vals[0], 10);
-  if (vals.length >= 2) res.away_goals = parseInt(vals[1], 10);
   return JSON.stringify(res);
 })()
 """
@@ -755,6 +814,98 @@ def extract_score_clock_js() -> str:
         }
         return JSON.stringify(out);
     })()"""
+
+
+def markets_from_js_entries(
+    entries: list[dict],
+    match_id: str = "live",
+    home_team: str = "",
+    away_team: str = "",
+) -> list[dict]:
+    """Turn the DOM-read market entries into the pipeline's market dicts.
+
+    The DOM path and the snapshot path produce the same shape here, so the
+    key resolution (header patterns, team-specific markets, the line for
+    O/U families) is shared.
+    """
+    markets: list[dict] = []
+    for entry in entries or []:
+        title = (entry.get("market") or "").strip()
+        if not title:
+            continue
+        sels = []
+        for s in entry.get("selections", []) or []:
+            name = (s.get("name") or "").strip()
+            odds = s.get("odds")
+            if not name or odds is None:
+                continue
+            try:
+                odds = float(odds)
+            except (TypeError, ValueError):
+                continue
+            if odds <= 1.0:
+                continue
+            sels.append({"name": name, "odds": odds})
+        hdr = _match_header(title)
+        if hdr is not None:
+            key, line, period = hdr
+        else:
+            key = _team_over_under_key(title, home_team, away_team)
+            line, period = None, "full"
+        if not key:
+            key = _slug(title)
+        market = {
+            "match_id": match_id,
+            "market_key": key,
+            "market_label": title,
+            "selections": sels,
+            "status": "open" if len(sels) >= 2 else "suspended",
+            "line": line,
+            "period": period,
+        }
+        for s in sels:
+            _maybe_set_ou_line(market, s["name"], s["odds"])
+        markets.append(market)
+    return _post_process_markets(markets)
+
+
+def extract_markets_js() -> str:
+    """Return JS source that reads the live markets (headers + odds) from the DOM.
+
+    This is the PRIMARY extraction path. The accessibility snapshot
+    intermittently fails on the heavy live board (the daemon returns 502),
+    so the markets are read from the DOM and the snapshot is only a
+    fallback.
+
+    Structure: each market is a '.m-table__wrapper' holding a title
+    ('.m-table-header-title') and one or more '.m-table-row.m-outcome'
+    rows. Each selection cell holds two '.m-table-cell-item' elements: the
+    selection name and its price.
+    """
+    return r"""
+(() => {
+  const out = [];
+  const wrappers = document.querySelectorAll('.m-table__wrapper');
+  const ODDS = /^[0-9]{1,3}\.[0-9]{2}$/;
+  wrappers.forEach(w => {
+    const titleEl = w.querySelector('.m-table-header-title');
+    const title = titleEl ? (titleEl.innerText || '').trim() : '';
+    const sels = [];
+    w.querySelectorAll('.m-table-row.m-outcome').forEach(row => {
+      row.querySelectorAll('.m-table-cell').forEach(cell => {
+        const items = Array.from(cell.querySelectorAll('.m-table-cell-item'))
+          .map(i => (i.innerText || '').trim());
+        const prices = items.filter(t => ODDS.test(t));
+        if (!prices.length) return;
+        const name = items.find(t => t && !ODDS.test(t)) || '';
+        sels.push({name: name, odds: parseFloat(prices[prices.length - 1])});
+      });
+    });
+    if (title) out.push({market: title, selections: sels});
+  });
+  return JSON.stringify(out);
+})()
+"""
 
 
 def extract_stats_js() -> str:

@@ -1,0 +1,26 @@
+[Unit]
+Description=Kimi WebBridge daemon (browser bridge for ATLAS)
+Documentation=https://github.com/Kimi-Browser/WebBridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas
+Environment=HOME=/home/atlas
+# The daemon serves the browser bridge on 127.0.0.1:10086. The browser
+# itself (with the Kimi WebBridge extension installed and logged into
+# SportyBet) must be running for the daemon to have a tab to drive; ATLAS
+# never navigates the live board directly, so a wedged tab is recoverable.
+ExecStart=/home/atlas/.kimi-webbridge/bin/kimi-webbridge daemon
+Restart=always
+RestartSec=10
+TimeoutStopSec=20
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

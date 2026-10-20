@@ -158,16 +158,22 @@ def test_path_engine_is_fast_enough_for_the_fast_plane():
     import time
 
     model = GoalPathModel.from_intensities(0.5, 0.4, max_goals=10)
-    t0 = time.perf_counter_ns()
-    for _ in range(20):
-        model.lead_by_at_any_time(HOME, 2, base_diff=0)
-    lead_us = (time.perf_counter_ns() - t0) / 1000.0 / 20
+
+    def best_of(fn, reps=5, calls=20):
+        # The minimum over several runs: a single timing on a loaded machine
+        # is noise, the minimum is what reflects the work done.
+        out = []
+        for _ in range(reps):
+            t0 = time.perf_counter_ns()
+            for _ in range(calls):
+                fn()
+            out.append((time.perf_counter_ns() - t0) / 1000.0 / calls)
+        return min(out)
+
+    lead_us = best_of(lambda: model.lead_by_at_any_time(HOME, 2, base_diff=0))
     assert lead_us < 2000.0, f"{lead_us:.0f}us per lead-by query is too slow"
 
-    t0 = time.perf_counter_ns()
-    for _ in range(20):
-        model.goals_in_a_row(3)
-    row_us = (time.perf_counter_ns() - t0) / 1000.0 / 20
+    row_us = best_of(lambda: model.goals_in_a_row(3))
     assert row_us < 2000.0, f"{row_us:.0f}us per in-a-row query is too slow"
 
 

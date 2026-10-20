@@ -178,6 +178,7 @@ class Posture:
 
         return SequentialConfig(
             kelly_fraction=self.kelly_fraction,
+            bankroll_ngn=config.bankroll_ngn,
             min_stake_ngn=config.min_stake_ngn,
             max_stake_per_bet=self.max_stake_per_bet,
             max_exposure_per_match=self.max_exposure_per_match,

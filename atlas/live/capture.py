@@ -133,10 +133,15 @@ class LiveCapture:
 
         The direct navigation always times out, so the board is reached by
         loading a light page and then navigating client-side, which does not
-        wait for a load event.
+        wait for a load event. The live URL is NEVER passed to navigate().
+
+        In Multi View the whole board is shown; in Single View one match is.
+        The board is left in Multi View because the match selection needs the
+        list of live matches.
         """
         if self.board_loaded() and not force:
             self._loaded = True
+            self.ensure_multi_view()
             return
         try:
             self.adapter.navigate(LIGHT_URL)
@@ -155,6 +160,73 @@ class LiveCapture:
             pass
         time.sleep(3.0)
         self._loaded = True
+        self.ensure_multi_view()
+
+    JS_MULTI_VIEW = r"""
+    (() => {
+      const text = document.body.innerText || '';
+      if (!/Multi View/.test(text)) return JSON.stringify({ok: false, why: 'no multi view control'});
+      const rows = document.querySelectorAll('.match-row').length;
+      if (rows > 0) return JSON.stringify({ok: true, why: 'already multi', rows: rows});
+      const el = Array.from(document.querySelectorAll('*')).find(e =>
+        e.children.length === 0 && (e.textContent||'').trim() === 'Multi View');
+      if (!el) return JSON.stringify({ok: false, why: 'no multi view control'});
+      el.click();
+      return JSON.stringify({ok: true, why: 'clicked'});
+    })()
+    """
+
+    def ensure_multi_view(self) -> bool:
+        """The match selection needs the LIST of live matches, which is the
+        Multi View board. Single View shows one match at a time."""
+        try:
+            raw = self._evaluate(self.JS_MULTI_VIEW)
+        except CaptureError:
+            return False
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if isinstance(data, dict) and data.get("ok"):
+            time.sleep(1.5)
+            return True
+        return False
+
+    # --- session health ---------------------------------------------------
+
+    JS_SESSION = r"""
+    (() => {
+      const href = location.href || '';
+      const text = document.body.innerText || '';
+      const loginForm = !!document.querySelector('input[type=password]');
+      const onLogin = /\/login|\/signin/i.test(href);
+      const expired = /session (?:has )?expired|please log ?in|signed out/i.test(text);
+      return JSON.stringify({
+        expired: loginForm || onLogin || expired,
+        href: href, hasPasswordField: loginForm, onLoginPage: onLogin
+      });
+    })()
+    """
+
+    def session_expired(self) -> dict:
+        """Has the SportyBet session expired?
+
+        The session is the operator's login. When it expires the page
+        renders the login form, and a loop that does not notice just keeps
+        planning against a board it can no longer bet on.
+        """
+        try:
+            raw = self._evaluate(self.JS_SESSION)
+        except CaptureError:
+            return {"expired": False}
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return {"expired": False}
+        else:
+            data = raw if isinstance(raw, dict) else {}
+        return data or {"expired": False}
 
     # --- capture ---------------------------------------------------------
 
@@ -398,29 +470,126 @@ class LiveCapture:
         self._loaded = True
         return True
 
+    def read_markets_dom(self) -> list[dict]:
+        """Read the markets from the DOM.
+
+        This is the PRIMARY path: the accessibility snapshot intermittently
+        fails on the heavy live board (the daemon returns 502), so the
+        markets are read with targeted JS and the snapshot is only a
+        fallback.
+        """
+        from atlas.live.extract import extract_markets_js, markets_from_js_entries
+
+        try:
+            raw = self._evaluate(extract_markets_js())
+        except CaptureError:
+            return []
+        if isinstance(raw, str):
+            try:
+                entries = json.loads(raw)
+            except json.JSONDecodeError:
+                return []
+        else:
+            entries = raw if isinstance(raw, list) else []
+        if not entries:
+            return []
+        home, away = self._team_names()
+        return markets_from_js_entries(entries, self.match_id, home, away)
+
+    def _team_names(self) -> tuple[str, str]:
+        """The viewed match's team names, from the panel header."""
+        try:
+            raw = self._evaluate(
+                "(() => { let h = null; document.querySelectorAll('*').forEach(e => {"
+                " if (!h && e.children.length === 0 && / vs /.test(e.textContent||'')"
+                " && (e.textContent||'').length < 80) h = e; });"
+                " return h ? (h.textContent||'').trim() : ''; })()"
+            )
+        except CaptureError:
+            return ("", "")
+        if isinstance(raw, str) and " vs " in raw:
+            home, away = raw.split(" vs ", 1)
+            return (home.strip(), away.strip())
+        return ("", "")
+
+    def read_markets_snapshot(self) -> list[dict]:
+        """Read the markets from the accessibility tree (fallback path)."""
+        try:
+            texts = self._snapshot_texts()
+        except Exception:
+            return []
+        return extract_markets(texts, self.match_id)
+
+    def _state_from_dom(self) -> LiveMatchState:
+        """Build the observed state from the DOM alone.
+
+        The accessibility tree does not carry the scoreboard, so this is the
+        normal path: the scoreboard comes from the DOM and the team names
+        from the panel header.
+        """
+        from atlas.live.observe import TeamStats
+
+        board = self.read_scoreboard()
+        home, away = self._team_names()
+        return LiveMatchState(
+            match_id=self.match_id,
+            home=TeamStats(
+                name=home or "Home",
+                goals=board.get("home_goals"),
+            ),
+            away=TeamStats(
+                name=away or "Away",
+                goals=board.get("away_goals"),
+            ),
+            period=board.get("period") or "unknown",
+            clock_minute=board.get("clock_minute"),
+            clock_label=board.get("clock_label"),
+            observed_at=datetime.now(timezone.utc),
+            source="sportybet_dom",
+        )
+
     def capture(self, wait: bool = True) -> CaptureResult:
         """Read the focused match panel, waiting until it is ready."""
         deadline = time.monotonic() + (self.max_wait_s if wait else 0.0)
         reason = "not captured"
         media_hidden = False
         recovered = False
+        # The board must be loaded before anything is read, and the live URL
+        # is never passed to navigate().
+        if not self.board_loaded():
+            self.load_board()
         while True:
-            try:
-                texts = self._snapshot_texts()
-            except Exception as e:
-                reason = f"snapshot failed: {e}"
-                if time.monotonic() >= deadline:
-                    return CaptureResult(False, reason, match_id=self.match_id)
-                # The extension wedges on the heavy page and stops answering.
-                # Recovering is cheaper than failing the cycle.
-                if not recovered:
-                    recovered = True
-                    self.recover()
-                time.sleep(self.poll_s)
-                continue
-
-            markets = extract_markets(texts, self.match_id)
-            state = extract_live_match_state(texts, self.match_id)
+            # P0: a session that has expired is detected and reported, so
+            # the loop can tell the operator instead of failing silently.
+            session = self.session_expired()
+            if session.get("expired"):
+                return CaptureResult(
+                    False,
+                    "session expired (the page is showing the login form)",
+                    observed_at=datetime.now(timezone.utc),
+                    match_id=self.match_id,
+                )
+            # The DOM is the primary path; the snapshot is the fallback.
+            markets = self.read_markets_dom()
+            texts: list[str] = []
+            if not markets:
+                try:
+                    texts = self._snapshot_texts()
+                except Exception as e:
+                    reason = f"snapshot failed: {e}"
+                    if time.monotonic() >= deadline:
+                        return CaptureResult(False, reason, match_id=self.match_id)
+                    # The extension wedges on the heavy page and stops
+                    # answering. Recovering is cheaper than failing the cycle.
+                    if not recovered:
+                        recovered = True
+                        self.recover()
+                    time.sleep(self.poll_s)
+                    continue
+                markets = extract_markets(texts, self.match_id)
+            state = extract_live_match_state(texts, self.match_id) if texts else None
+            if state is None:
+                state = self._state_from_dom()
             # The DOM is authoritative for the scoreboard: the accessibility
             # tree does not expose it.
             board = self.read_scoreboard()

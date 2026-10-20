@@ -33,6 +33,7 @@ class BetRecord:
     ev: float
     confidence: str
     correlation_groups: list[str]
+    priced_odds: Optional[float] = None  # the odds the model priced
     status: str = "pending"
     pnl_ngn: float = 0.0
     placed_at: Optional[str] = None
@@ -222,6 +223,11 @@ class BetLedger:
             selection=str(bet.get("selection", "")),
             odds=float(bet.get("odds", 0.0) or 0.0),
             stake_ngn=float(bet.get("stake_ngn", bet.get("stake", 0.0)) or 0.0),
+            priced_odds=(
+                float(bet["priced_odds"])
+                if bet.get("priced_odds") is not None
+                else None
+            ),
             model_p=float(bet.get("model_p", 0.0) or 0.0),
             p_lower=bet.get("p_lower"),
             ev=float(bet.get("ev", 0.0) or 0.0),

@@ -39,6 +39,8 @@ it today.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -61,11 +63,11 @@ class BetslipError(RuntimeError):
 
 @dataclass
 class SlipSelection:
-    market: str
-    selection: str
-    odds: float
-    stake_ngn: float = 0.0
-    potential_win: float = 0.0
+    """One selection on the slip, with the odds the book ACCEPTED."""
+
+    name: str
+    market: str = ""
+    odds: float = 0.0
 
 
 @dataclass
@@ -75,6 +77,58 @@ class SlipState:
     potential_win_ngn: float = 0.0
     can_place_bet: bool = False
     raw_text: str = ""
+
+    @property
+    def accepted_odds(self) -> Optional[float]:
+        """The odds the book accepted for the single selection on the slip.
+
+        With more than one selection there is no single accepted price, so
+        the caller must check the selection list instead.
+        """
+        if len(self.selections) == 1:
+            return self.selections[0].odds
+        return None
+
+
+_ODDS_TOKEN_RE = re.compile(r"\b([0-9]{1,3}\.[0-9]{2})\b")
+
+
+def parse_slip_text(text: str) -> tuple[list[SlipSelection], float, float]:
+    """Parse the betslip's text into (selections, total_stake, potential_win).
+
+    The slip renders as: selection name, event, market title, odds, then
+    'Total Stake', the stake, then 'Potential Win', the payout. The odds
+    that matter are the ones BEFORE 'Total Stake' — the number after it is
+    the payout, which is not an odds price.
+    """
+    lines = [ln.strip() for ln in (text or "").split("\n") if ln.strip()]
+    joined = " | ".join(lines)
+    stake = 0.0
+    potential = 0.0
+    head = joined
+    m_stake = re.search(r"Total Stake\s*([0-9][0-9,.]*)", joined, re.IGNORECASE)
+    if m_stake:
+        try:
+            stake = float(m_stake.group(1).replace(",", ""))
+        except ValueError:
+            stake = 0.0
+        head = joined[: m_stake.start()]
+    m_pot = re.search(r"Pot(?:ential)?\.?\s*Win\s*([0-9][0-9,.]*)", joined, re.IGNORECASE)
+    if m_pot:
+        try:
+            potential = float(m_pot.group(1).replace(",", ""))
+        except ValueError:
+            potential = 0.0
+
+    odds_tokens = _ODDS_TOKEN_RE.findall(head)
+    selections: list[SlipSelection] = []
+    if odds_tokens:
+        # The accepted price is the last odds token before the stake: the
+        # earlier ones belong to the event or the market title.
+        selections.append(
+            SlipSelection(name="", market="", odds=float(odds_tokens[-1]))
+        )
+    return selections, stake, potential
 
 
 def validate_stake(stake_ngn: float, balance_ngn: Optional[float] = None) -> str:
@@ -185,8 +239,6 @@ class BetslipDriver:
     # --- low level -----------------------------------------------------
 
     def _js(self, template: str, **fmt: Any) -> dict:
-        import json
-
         code = template % fmt
         raw = self.adapter.evaluate(code)
         # WebBridge returns {"type": "string", "value": "<json>"};
@@ -221,7 +273,15 @@ class BetslipDriver:
         )
 
     def read_slip(self) -> SlipState:
+        """Read the slip, including the odds the book ACCEPTED.
+
+        The accepted odds matter: the book can move the price between the
+        click and the acceptance, and a bet placed at a worse price than the
+        one that was priced is not the bet that was approved.
+        """
         data = self._js(JS_READ_SLIP, input=STAKE_INPUT_SELECTOR)
+        text = " | ".join(data.get("seg", []))
+        selections, parsed_stake, potential = parse_slip_text(text)
         stake_raw = data.get("stake")
         stake = 0.0
         if stake_raw:
@@ -229,12 +289,14 @@ class BetslipDriver:
                 stake = float(str(stake_raw).replace(",", ""))
             except ValueError:
                 stake = 0.0
+        if not stake:
+            stake = parsed_stake
         return SlipState(
-            selections=[],
+            selections=selections,
             total_stake_ngn=stake,
-            potential_win_ngn=0.0,
+            potential_win_ngn=potential,
             can_place_bet=bool(data.get("canPlace")),
-            raw_text=" | ".join(data.get("seg", [])),
+            raw_text=text,
         )
 
     def clear(self) -> dict:

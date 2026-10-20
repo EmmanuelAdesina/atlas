@@ -100,12 +100,20 @@ def build_app(runner: LiveRunner, notifier: Optional[Notifier] = None) -> FastAP
 
 def serve(
     runner: LiveRunner,
-    host: str = "127.0.0.1",
-    port: int = 8077,
+    host: Optional[str] = None,
+    port: Optional[int] = None,
     notifier: Optional[Notifier] = None,
 ) -> None:
-    """Run the control API."""
+    """Run the control API.
+
+    The bind address comes from ATLAS_HOST / ATLAS_PORT, because on a VPS
+    127.0.0.1 is unreachable from outside the box. The default stays on the
+    loopback: an open dashboard on a public interface should be a deliberate
+    choice, not the default.
+    """
     import uvicorn
 
+    host = host or os.environ.get("ATLAS_HOST", "127.0.0.1")
+    port = int(port or os.environ.get("ATLAS_PORT", "8077"))
     app = build_app(runner, notifier)
     uvicorn.run(app, host=host, port=port, log_level="warning")

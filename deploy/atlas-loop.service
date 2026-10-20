@@ -1,0 +1,36 @@
+[Unit]
+Description=ATLAS autonomous live betting loop
+Documentation=file:///opt/atlas/docs/bugs_and_issues.md
+After=network-online.target kimi-webbridge.service
+Wants=network-online.target
+Requires=kimi-webbridge.service
+
+[Service]
+Type=simple
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas
+EnvironmentFile=/opt/atlas/.env
+# The loop plans and prices but does not place. To arm execution, add
+# --submit to the arguments below AND make sure the account is funded and
+# the daily stop is in place.
+ExecStart=/opt/atlas/.venv/bin/python -m atlas.main run --cycle-seconds 30
+Restart=always
+RestartSec=10
+# The loop is quiet for long stretches; a hung process must be caught.
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+# The ledger and the decision log are the audit trail: never lose them.
+StateDirectory=atlas
+LogsDirectory=atlas
+StandardOutput=append:/var/log/atlas/loop.log
+StandardError=append:/var/log/atlas/loop.err
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/atlas/data /var/log/atlas
+
+[Install]
+WantedBy=multi-user.target

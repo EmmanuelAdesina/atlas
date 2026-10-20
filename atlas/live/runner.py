@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from atlas.live.arb import Selection, best_arbs
+from atlas.live.decisions import PolicyConfig
 from atlas.live.capture import CaptureResult, LiveCapture
 from atlas.live.estimate import CalibratedModel, LiveStateSpaceModel
 from atlas.live.loop import Opportunity
@@ -37,6 +38,11 @@ from atlas.ops.ledger import BetLedger
 from atlas.ops.notify import Notifier
 from atlas.ops.posture import Posture, posture_for_mode
 from atlas.portfolio.sequential import SequentialConfig, SequentialPortfolio
+
+# The maximum relative difference between the odds that were priced and
+# the odds the book accepted. A live price can move between the click and
+# the acceptance, and a 2% drift turns a +EV bet into a -EV one silently.
+PRICE_MISMATCH_TOLERANCE = 0.02
 
 # Markers that mean a match is not live and must never be selected.
 FINISHED_MARKERS = (
@@ -68,6 +74,8 @@ class CycleReport:
     placed: int = 0
     arbs: int = 0
     settled: int = 0
+    cashouts: int = 0
+    cashout_taken: int = 0
     daily_pnl: float = 0.0
     stop_active: bool = False
     notes: list[str] = field(default_factory=list)
@@ -77,7 +85,7 @@ class CycleReport:
             f"cycle {self.cycle} [{self.at}] {self.reason}: priced "
             f"{self.priced_selections}, opps {self.opportunities}, planned "
             f"{self.planned}, placed {self.placed}, settled {self.settled}, "
-            f"daily P&L {self.daily_pnl:+.0f}"
+            f"daily P&L {self.daily_pnl:+.0f}, cashouts {self.cashouts}"
             + (" [STOP]" if self.stop_active else "")
         )
 
@@ -93,21 +101,27 @@ class LiveRunner:
         betslip: Any = None,
         cashout_driver: Any = None,
         posture: Optional[Posture] = None,
+        policy: Optional[PolicyConfig] = None,
         cycle_s: float = 30.0,
         model: Any = None,
         allow_submission: bool = False,
         state_path: Optional[str] = None,
+        decision_log_path: Optional[str] = None,
     ) -> None:
         self.capture = capture
         self.ledger = ledger
         self.notifier = notifier
         self.betslip = betslip
         self.cashout_driver = cashout_driver
+        self.policy = policy
         self.posture = posture or posture_for_mode("balanced")
         self.cycle_s = cycle_s
         self.model = model or LiveStateSpaceModel(now=datetime.now(timezone.utc))
         self.allow_submission = allow_submission
         self.state_path = Path(state_path) if state_path else None
+        self.decision_log_path = (
+            Path(decision_log_path) if decision_log_path else None
+        )
         self.cycle = 0
         self.reports: list[CycleReport] = []
         self.last_error: Optional[str] = None
@@ -227,24 +241,109 @@ class LiveRunner:
                 )
         return opportunities, priced, selections
 
+    def _log_decisions(self, decisions: list, match_id: str) -> None:
+        """Append this cycle's decisions to the audit log."""
+        if self.decision_log_path is None:
+            return
+        try:
+            path = Path(self.decision_log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                for d in decisions:
+                    f.write(
+                        json.dumps(
+                            {
+                                "at": datetime.now(timezone.utc).isoformat(),
+                                "cycle": self.cycle,
+                                "match_id": match_id,
+                                "market_key": d.opportunity.market_key,
+                                "selection": d.opportunity.selection,
+                                "odds": d.opportunity.odds,
+                                "model_p": d.opportunity.model_p,
+                                "ev": d.opportunity.ev,
+                                "ev_lower": d.opportunity.ev_lower,
+                                "stake_ngn": d.stake_ngn,
+                                "decision": d.decision,
+                                "reason": d.reason,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+        except Exception as e:
+            self.last_error = f"decision log failed: {e}"
+
     # --- placing ---------------------------------------------------------
 
     def place_bets(
         self, decisions: list, state: LiveMatchState, cycle: int
     ) -> int:
-        """Submit the accepted bets. The only place money moves."""
+        """Submit the accepted bets. The only place money moves.
+
+        Three gates stand between a decision and the book:
+          1. the policy must allow execution (an explicit operator opt-in);
+          2. the daily stop and the kill switch are re-checked HERE, not
+             only at the start of the cycle, so a stop that engaged while
+             the cycle was pricing cannot be raced past;
+          3. the odds the book ACCEPTED must match the odds that were
+             priced, within PRICE_MISMATCH_TOLERANCE. The book can move a
+             live price between the click and the acceptance, and a 2%
+             drift turns a +EV bet into a -EV one silently.
+        """
         if self.betslip is None or not self.allow_submission:
             return 0
+        if self.policy is not None and not self.policy.allow_execution:
+            return 0
+        # Defence in depth: the stop may have engaged since the cycle began.
+        if self.ledger.is_daily_stop_active():
+            if self.notifier is not None:
+                self.notifier.warn(
+                    "Daily stop active — placement refused",
+                    f"daily P&L {self.ledger.daily_pnl():.2f}",
+                    cycle=cycle,
+                )
+            return 0
+        if self.policy is not None and self.policy.kill_switch:
+            return 0
+
         placed = 0
         for d in decisions:
             if not d.should_bet:
                 continue
+            # Re-check the stop before EVERY bet, not just once per cycle.
+            if self.ledger.is_daily_stop_active():
+                break
             try:
                 self.betslip.add_odds(d.opportunity.odds)
                 self.betslip.set_stake(d.stake_ngn)
                 slip = self.betslip.read_slip()
                 if not slip.can_place_bet:
                     self.betslip.clear()
+                    continue
+                accepted = slip.accepted_odds
+                if accepted is None:
+                    # The slip did not report a price, so it cannot be
+                    # verified against the priced odds. Do not guess.
+                    self.betslip.clear()
+                    if self.notifier is not None:
+                        self.notifier.warn(
+                            "Slip odds unreadable — bet refused",
+                            f"{d.opportunity.market_key} {d.opportunity.selection}",
+                            cycle=cycle,
+                        )
+                    continue
+                drift = abs(accepted - d.opportunity.odds) / d.opportunity.odds
+                if drift > PRICE_MISMATCH_TOLERANCE:
+                    self.betslip.clear()
+                    if self.notifier is not None:
+                        self.notifier.warn(
+                            "Odds moved — bet refused",
+                            f"priced {d.opportunity.odds:.2f}, accepted {accepted:.2f} "
+                            f"({drift:.1%} > {PRICE_MISMATCH_TOLERANCE:.0%})",
+                            cycle=cycle,
+                            market_key=d.opportunity.market_key,
+                            selection=d.opportunity.selection,
+                        )
                     continue
                 self.betslip.place_bet()
                 placed += 1
@@ -253,7 +352,8 @@ class LiveRunner:
                         "match_id": state.match_id,
                         "market_key": d.opportunity.market_key,
                         "selection": d.opportunity.selection,
-                        "odds": d.opportunity.odds,
+                        "odds": accepted,
+                        "priced_odds": d.opportunity.odds,
                         "stake_ngn": d.stake_ngn,
                         "model_p": d.opportunity.model_p,
                         "p_lower": d.opportunity.p_lower,
@@ -265,6 +365,10 @@ class LiveRunner:
                 self.last_error = f"place failed: {e}"
                 if self.notifier is not None:
                     self.notifier.warn("Bet placement failed", str(e))
+                try:
+                    self.betslip.clear()
+                except Exception:
+                    pass
                 continue
         return placed
 
@@ -405,6 +509,21 @@ class LiveRunner:
             self.reports.append(report)
             return report
 
+        # P0: an expired session is a distinct failure from a busy board.
+        # The operator must be told, because no bet can be placed until the
+        # session is restored.
+        if "session expired" in (result.reason or ""):
+            if self.notifier is not None:
+                self.notifier.critical(
+                    "SportyBet session expired",
+                    "the board is showing the login form — re-login is needed; "
+                    "the loop will keep running and will not place bets",
+                    cycle=self.cycle,
+                )
+            report.reason = result.reason
+            self.reports.append(report)
+            return report
+
         # If the focused match is not live (finished, or the board parked on
         # one), pick a live match from the board and open it.
         if not result.ready or (
@@ -468,8 +587,13 @@ class LiveRunner:
                 match_id=result.match_id,
             )
 
+        base_config = SequentialConfig()
+        if self.policy is not None:
+            base_config = replace(
+                base_config, bankroll_ngn=self.policy.bankroll_ngn
+            )
         portfolio = SequentialPortfolio(
-            self.posture.apply_to(SequentialConfig())
+            self.posture.apply_to(base_config)
         )
         placed_bets = self.ledger.bets_for(result.match_id)
         decisions = portfolio.evaluate_snapshot(
@@ -485,6 +609,18 @@ class LiveRunner:
         accepted = [d for d in decisions if d.should_bet]
         report.planned = len(accepted)
 
+        # The policy is the last word. With execution disabled the decisions
+        # are still planned and logged — they are just not recommendations.
+        if self.policy is not None and not self.policy.allow_execution:
+            for d in accepted:
+                d.decision = "pass"
+                d.should_bet = False
+                d.reason = (
+                    f"{d.reason} | execution disabled (observe-only)"
+                )
+            report.planned = 0
+        self._log_decisions(decisions, result.match_id)
+
         if self.posture.require_guaranteed_profit:
             arb_names = {name for arb in arbs for name, _ in arb.legs}
             accepted = [
@@ -494,6 +630,17 @@ class LiveRunner:
 
         if accepted:
             report.placed = self.place_bets(accepted, result.state, self.cycle)
+
+        # P1: an open losing position gets a cashout decision every cycle.
+        # Without this the position just sits there losing while the loop
+        # only ever considers new bets.
+        try:
+            cashouts = self.handle_cashout_offers()
+        except Exception as e:
+            cashouts = []
+            self.last_error = f"cashout check failed: {e}"
+        report.cashouts = len(cashouts)
+        report.cashout_taken = sum(1 for c in cashouts if c.get("recommended"))
 
         self.reports.append(report)
         return report
