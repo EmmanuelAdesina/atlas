@@ -52,6 +52,41 @@
 | B31 | No bet submission layer. The WebBridge `click` primitive exists but nothing clicks odds; `atlas.main plan` is observe-only. | **Partially done.** `atlas/browser/betslip.py` now drives the real slip: add odds, set stake, read slip, clear. Verified live against the board (selected `Draw (0:2) | Live Al-Shabab FC v Al-Faisaly FC | Handicap 0:2 | 17.00`, set NGN 100, read it back, cleared it). `place_bet()` is implemented but refuses to run unless the driver is constructed with `allow_submit=True` — nothing in ATLAS enables it. Still open: the autonomous loop that decides *when* to place, and the cashout execution path. |
 | B32 | The `plan` path used the raw `LiveStateSpaceModel`, bypassing the calibration layer and its 5pp model-market gap guard that exists to block fake edges. | **Fixed** (plan now uses `CalibratedModel`). |
 
+### Phantom edges found against the live board (all fixed)
+
+Three separate layers each produced a false edge. They are listed together
+because the pattern is the lesson: every one of them was found by running
+the finished pipeline against real odds, not by testing the code.
+
+| Where | What it did | Symptom |
+|-------|-------------|---------|
+| `math_engine` 1UP/2UP | Summed the remaining-goal difference without the scoreline deficit, so a side 0-2 down read as ~13% to lead by 1 | +5.31 EV at 47.00 on an impossible outcome |
+| `CalibratedModel` | Shrank the full-time 1X2 toward the 'Rest of the Match' prior, which settles on the REMAINING time — a different event unless the score is level | +4.50 EV at 65.00 (model 9.5% vs the book's 1.4%) |
+| `CalibratedModel` interval | The shrink can pull the probability below the base model's own lower bound, so the 'conservative' EV was computed from a HIGHER probability than the headline | A market with +0.007 headline EV passed a +0.05 conservative floor |
+
+The guard that should have caught the last one is the conservative EV, which
+is exactly what gates betting — so the interval has to stay coherent:
+`[min(calibrated, base_lower), max(calibrated, base_upper)]`.
+
+### Browser and site behaviour (the operational constraints)
+
+Established by driving the real board; every one of them is load-bearing.
+
+| # | Behaviour | Consequence |
+|---|-----------|-------------|
+| 1 | The live page never fires `load` (it holds a websocket open) | `navigate()` always times out and then unregisters the tab, 502ing every later call. Reach the board via a light page and a client-side navigation. |
+| 2 | The accessibility `snapshot` intermittently 502s on the heavy board | Extraction uses targeted `evaluate` JS; snapshots are retried. |
+| 3 | The extension wedges after heavy clicking | Recover by loading a light page (re-registers the tab) and retrying. The loop degrades with a reason instead of failing. |
+| 4 | The scoreboard is NOT in the accessibility tree | The clock and period live in one text node (`.m-result-title`, e.g. "66' H2") and the score in sibling `.m-value-1` elements. The DOM is read directly. |
+| 5 | The score is also published in the book's own market title | 'Rest of the Match (current score 1:0)' is a reliable fallback. |
+| 6 | The 'SportyTV' media widget can expand over the scoreboard | The capture collapses it with the 'Hide' control and retries. |
+| 7 | Multi View is the real board; Single View shows one match | The board reader reads `.match-row` (36-39 live matches with clocks and periods) and falls back to Single View cards. |
+| 8 | Clicking a board row NAVIGATES to that match's dedicated page | The selection step opens the match, and the panel is read from there. |
+| 9 | The Statistics panel REPLACES the market panel (its tabs go with it) | Statistics are read last, then the market panel is restored with the 'Match Tracker' control. |
+| 10 | The stat values are NOT in the caption's subtree | Each caption is walked up to the block holding a readable home/away value. |
+| 11 | A finished match shows 'ENDED' / 'Match Ended' instead of a scoreboard | The capture detects it and the period becomes `ft`, so the runner settles. |
+| 12 | The board's live feed periodically delivers nothing | The readiness gate refuses to plan on an incomplete board. |
+
 ### Live-board coverage: what is still unpriced (after the path engine)
 
 Measured against the captured real board (92 headers, 2,794 odds, one match).
