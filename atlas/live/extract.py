@@ -758,415 +758,64 @@ def extract_score_clock_js() -> str:
 
 
 def extract_stats_js() -> str:
-    """Return JS source for WebBridge evaluate to extract stats from DOM.
+    """Return JS source that reads the live statistics panel.
 
-    Searches the Statistics section for stat labels and their home/away values.
-    Works across match formats by looking for label text and nearby numbers.
-    """
-    return """(()=>{
-        const out={};
-        const labels=['BALL POSSESSION','CARDS','CORNERS','ON TARGET','SAVES','ATTEMPTS','FOULS','OFFSIDES','CONVERSION RATE'];
-        const all=document.querySelectorAll('*');
-        for(const el of all){
-            if(el.children.length>0)continue;
-            const t=(el.innerText||'').trim().toUpperCase();
-            if(!t||t.length>25)continue;
-            if(labels.includes(t)){
-                const parent=el.parentElement;
-                if(!parent)continue;
-                const nums=[];
-                const siblings=parent.querySelectorAll('*');
-                for(const s of siblings){
-                    if(s.children.length>0)continue;
-                    const v=(s.innerText||'').trim();
-                    const m=v.match(/^(\\d+(?:\\.\\d+)?)$/);
-                    if(m)nums.push(parseFloat(m[1]));
-                    if(nums.length>=6)break;
-                }
-                if(nums.length>=2){
-                    if(t==='BALL POSSESSION')out.possession_pct={home:nums[0],away:nums[1]};
-                    else if(t==='CORNERS')out.corners={home:nums[0],away:nums[1]};
-                    else if(t==='ON TARGET')out.shots_on_target={home:nums[0],away:nums[1]};
-                    else if(t==='SAVES')out.saves={home:nums[0],away:nums[1]};
-                    else if(t==='ATTEMPTS')out.attempts={home:nums[0],away:nums[1]};
-                    else if(t==='FOULS')out.fouls={home:nums[0],away:nums[1]};
-                    else if(t==='OFFSIDES')out.offsides={home:nums[0],away:nums[1]};
-                    else if(t==='CONVERSION RATE')out.conversion_rate={home:nums[0],away:nums[1]};
-                    else if(t==='CARDS'&&nums.length>=4)out.yellow_cards={home:nums[0],away:nums[2]},out.red_cards={home:nums[1],away:nums[3]};
-                }
-            }
-        }
-        return JSON.stringify(out);
-    })()"""
+    The panel is opened by clicking the 'Statistics' control; its markup
+    pairs each stat with a caption ('CORNERS') and the two side values,
+    and the values are NOT in the same subtree as the caption, so each
+    caption is walked up until a block with a readable home/away value is
+    found.
 
-
-_STAT_KEYS = (
-    "possession_pct",
-    "shots_on_target",
-    "corners",
-    "yellow_cards",
-    "red_cards",
-    "fouls",
-    "offsides",
-    "saves",
-    "attempts",
-    "conversion_rate",
-)
-
-# Stats-panel label -> result key. Values may sit after the label
-# ('CORNERS', '5', '1'), before it ('12', '8', 'ATTEMPTS'), or split
-# around it (cards). Possession/conversion skip a '%' token per value.
-_STAT_LABEL_KEYS = {
-    "BALL POSSESSION": "possession_pct",
-    "CONVERSION RATE": "conversion_rate",
-    "CORNERS": "corners",
-    "ON TARGET": "shots_on_target",
-    "SAVES": "saves",
-    "ATTEMPTS": "attempts",
-    "FOULS": "fouls",
-    "OFFSIDES": "offsides",
-}
-_STAT_LABELS_ALL = frozenset(_STAT_LABEL_KEYS) | {"CARDS"}
-
-
-def _numeric_token_values(tokens: list[str], contiguous: bool = False) -> list[float]:
-    """Collect numeric tokens from `tokens`, skipping '%'/'yellow'/'red' noise.
-
-    Stops at the first known stat label (so values never bleed across rows)
-    or at an unrecognised word once a number has been collected. With
-    `contiguous`, the run must be unbroken numbers (used scanning backwards,
-    where the previous row's values sit further away than this row's).
-    """
-    vals: list[float] = []
-    for t in tokens:
-        up = t.upper()
-        if up in _STAT_LABELS_ALL:
-            break
-        if up in {"YELLOW", "RED"} or t in {"%"}:
-            if contiguous:
-                break
-            continue
-        m = re.match(r"^(\d+(?:\.\d+)?)$", t)
-        if m:
-            vals.append(float(m.group(1)))
-            if len(vals) >= 4:
-                break
-        elif vals or contiguous:
-            break
-    return vals
-
-
-def _pair_after_label(
-    board: list[str], label: str, start: int
-) -> tuple[Optional[float], Optional[float]]:
-    """'LABEL', home, away — values follow the label."""
-    for i in range(start, len(board)):
-        if board[i] == label:
-            vals = _numeric_token_values(board[i + 1 :])
-            if len(vals) >= 2:
-                return vals[0], vals[1]
-    return None, None
-
-
-def _pair_before_label(
-    board: list[str], label: str, start: int
-) -> tuple[Optional[float], Optional[float]]:
-    """home, away, 'LABEL' — values precede the label.
-
-    Prefers values immediately after the label (label-first rows where an
-    older row's numbers sit further back), then falls back to a contiguous
-    backward scan.
-    """
-    for i in range(start, len(board)):
-        if board[i] == label:
-            after = _numeric_token_values(board[i + 1 : i + 3])
-            if len(after) >= 2:
-                return after[0], after[1]
-            vals = _numeric_token_values(
-                board[max(start, i - 8) : i][::-1], contiguous=True
-            )
-            if len(vals) >= 2:
-                return vals[1], vals[0]
-    return None, None
-
-
-def _cards_fallback(board: list[str], start: int) -> dict:
-    """MLS cards layout: numbers ordered home_yellow home_red away_yellow away_red.
-
-    Handles the label-first row ('CARDS', '0', '0', '3', '0'), the split row
-    ('0', '0', 'CARDS', '3', '0') and the all-before row.
-    """
-    empty = {"yellow_cards": {"home": None, "away": None},
-             "red_cards": {"home": None, "away": None}}
-    for i in range(start, len(board)):
-        if board[i] != "CARDS":
-            continue
-        after = _numeric_token_values(board[i + 1 :])
-        before = _numeric_token_values(
-            board[max(start, i - 8) : i][::-1], contiguous=True
-        )
-        if len(after) >= 4:
-            return {
-                "yellow_cards": {"home": after[0], "away": after[2]},
-                "red_cards": {"home": after[1], "away": after[3]},
-            }
-        if len(before) >= 2 and len(after) >= 2:
-            return {
-                "yellow_cards": {"home": before[1], "away": after[0]},
-                "red_cards": {"home": before[0], "away": after[1]},
-            }
-        if len(before) >= 4:
-            return {
-                "yellow_cards": {"home": before[3], "away": before[1]},
-                "red_cards": {"home": before[2], "away": before[0]},
-            }
-    return empty
-
-
-def _extract_stats_primary(board: list[str], start: int) -> dict:
-    """Layout-specific pass over the statistics panel texts.
-
-    SportyBet rows mix two layouts: some labels precede their values
-    ('CORNERS', '3', '1') and some follow them ('18', '20', 'FOULS'). Cards
-    split around the label ([home_red, home_yellow, 'CARDS', away_yellow,
-    away_red]). Values alternate home/away.
-    """
-    stats: dict = {key: {"home": None, "away": None} for key in _STAT_KEYS}
-    claimed: set[int] = set()
-
-    def pair_after(label: str) -> tuple[Optional[int], Optional[int]]:
-        for i in range(start, len(board) - 2):
-            if board[i] == label and board[i + 1].isdigit() and board[i + 2].isdigit():
-                claimed.update((i + 1, i + 2))
-                return int(board[i + 1]), int(board[i + 2])
-        return None, None
-
-    def pair_before(label: str) -> tuple[Optional[int], Optional[int]]:
-        for i in range(start + 2, len(board)):
-            if board[i] == label and board[i - 2].isdigit() and board[i - 1].isdigit():
-                if (i - 2) in claimed or (i - 1) in claimed:
-                    continue
-                return int(board[i - 2]), int(board[i - 1])
-        return None, None
-
-    for i in range(start, len(board) - 4):
-        if board[i] == "BALL POSSESSION" and board[i + 1].isdigit() and board[i + 3].isdigit():
-            stats["possession_pct"] = {
-                "home": float(board[i + 1]),
-                "away": float(board[i + 3]),
-            }
-            claimed.update((i + 1, i + 3))
-            break
-
-    for i in range(start + 2, len(board) - 2):
-        if (
-            board[i] == "CARDS"
-            and board[i - 2].isdigit()
-            and board[i - 1].isdigit()
-            and board[i + 1].isdigit()
-            and board[i + 2].isdigit()
-            and (i - 2) not in claimed
-            and (i - 1) not in claimed
-        ):
-            stats["yellow_cards"] = {
-                "home": int(board[i - 1]),
-                "away": int(board[i + 1]),
-            }
-            stats["red_cards"] = {
-                "home": int(board[i - 2]),
-                "away": int(board[i + 2]),
-            }
-            claimed.update((i - 2, i - 1, i + 1, i + 2))
-            break
-
-    h_corners, a_corners = pair_after("CORNERS")
-    stats["corners"] = {"home": h_corners, "away": a_corners}
-    h_sot, a_sot = pair_after("ON TARGET")
-    stats["shots_on_target"] = {"home": h_sot, "away": a_sot}
-    h_saves, a_saves = pair_after("SAVES")
-    stats["saves"] = {"home": h_saves, "away": a_saves}
-    h_attempts, a_attempts = pair_after("ATTEMPTS")
-    stats["attempts"] = {"home": h_attempts, "away": a_attempts}
-    h_conv, a_conv = pair_after("CONVERSION RATE")
-    stats["conversion_rate"] = {"home": h_conv, "away": a_conv}
-    h_fouls, a_fouls = pair_before("FOULS")
-    stats["fouls"] = {"home": h_fouls, "away": a_fouls}
-    h_offsides, a_offsides = pair_before("OFFSIDES")
-    stats["offsides"] = {"home": h_offsides, "away": a_offsides}
-    return stats
-
-
-def extract_stats_from_texts(texts: list[str]) -> dict:
-    """Parse the live statistics panel from snapshot texts, any match format.
-
-    Runs the layout-specific pass first, then retries any field it missed
-    with a label-agnostic scan that handles 'label home away',
-    'home away label', and MLS rows whose values carry '%' or
-    'yellow'/'red' tokens. MLS cards arrive as four numbers ordered
-    home_yellow home_red away_yellow away_red.
-    """
-    board = [t.strip() for t in texts if t.strip()]
-    try:
-        start = board.index("Statistics")
-    except ValueError:
-        start = 0
-
-    stats = _extract_stats_primary(board, start)
-
-    def fill(key: str, finder) -> None:
-        pair = stats.get(key) or {"home": None, "away": None}
-        if pair["home"] is None or pair["away"] is None:
-            h, a = finder()
-            if h is not None and a is not None:
-                stats[key] = {"home": h, "away": a}
-
-    fill("possession_pct", lambda: _pair_after_label(board, "BALL POSSESSION", start))
-    fill("shots_on_target", lambda: _pair_after_label(board, "ON TARGET", start))
-    fill("corners", lambda: _pair_after_label(board, "CORNERS", start))
-    fill("saves", lambda: _pair_after_label(board, "SAVES", start))
-    fill("attempts", lambda: _pair_after_label(board, "ATTEMPTS", start))
-    fill("conversion_rate", lambda: _pair_after_label(board, "CONVERSION RATE", start))
-
-    def fouls() -> tuple[Optional[float], Optional[float]]:
-        h, a = _pair_before_label(board, "FOULS", start)
-        if h is None or a is None:
-            return _pair_after_label(board, "FOULS", start)
-        return h, a
-
-    def offsides() -> tuple[Optional[float], Optional[float]]:
-        h, a = _pair_before_label(board, "OFFSIDES", start)
-        if h is None or a is None:
-            return _pair_after_label(board, "OFFSIDES", start)
-        return h, a
-
-    fill("fouls", fouls)
-    fill("offsides", offsides)
-
-    cards = _cards_fallback(board, start)
-    if (
-        stats["yellow_cards"]["home"] is None
-        and stats["yellow_cards"]["away"] is None
-        and cards["yellow_cards"]["home"] is not None
-    ):
-        stats["yellow_cards"] = cards["yellow_cards"]
-        stats["red_cards"] = cards["red_cards"]
-    return stats
-
-
-def extract_stats_js() -> str:
-    """Return a JS source string that extracts live match stats from the DOM.
-
-    Evaluate via the WebBridge `evaluate` action. Finds the Statistics
-    section, searches for the stat labels (BALL POSSESSION, CARDS, CORNERS,
-    ON TARGET, SAVES, ATTEMPTS, FOULS, OFFSIDES, CONVERSION RATE) and reads
-    the numeric values rendered next to each, so it works for layouts whose
-    snapshot text order differs from SportyBet's. Cards numbers are ordered
-    home_yellow home_red away_yellow away_red. Returns a JSON string:
+    Returns a JSON string:
     {possession_pct, shots_on_target, corners, yellow_cards, red_cards,
-    fouls, offsides} (plus saves/attempts/conversion_rate when present),
-    each {home, away}; a missing stat is simply absent from the JSON.
+     fouls, offsides, saves, attempts, conversion_rate}, each {home, away};
+    a missing stat is simply absent.
     """
     return r"""
 (() => {
-  const LABELS = ["BALL POSSESSION", "CARDS", "CONVERSION RATE", "CORNERS",
-                  "ON TARGET", "SAVES", "ATTEMPTS", "FOULS", "OFFSIDES"];
   const out = {};
-  const pair = (home, away) => ({home: home, away: away});
-  const ownText = (el) => Array.from(el.childNodes)
-    .filter((c) => c.nodeType === 3)
-    .map((c) => c.textContent.trim())
-    .join(" ")
-    .trim();
-  const firstNum = (s) => {
-    const m = String(s).match(/\d+(?:\.\d+)?/);
-    return m ? parseFloat(m[0]) : null;
-  };
-  const numsAfter = (el) => {
-    const res = [];
-    let sib = el.nextElementSibling;
-    let hops = 0;
-    while (sib && hops < 8 && res.length < 4) {
-      const v = firstNum(sib.textContent);
-      if (v !== null) res.push(v);
-      sib = sib.nextElementSibling;
-      hops += 1;
+  const num = (root, side) => {
+    for (const e of root.querySelectorAll('[class*=' + side + '-1]')) {
+      const t = (e.innerText || '').trim();
+      if (/^[0-9]+(\.[0-9]+)?$/.test(t)) return parseFloat(t);
     }
-    return res;
+    return null;
   };
-  const numsBefore = (el) => {
-    const res = [];
-    let sib = el.previousElementSibling;
-    let hops = 0;
-    while (sib && hops < 8 && res.length < 4) {
-      const v = firstNum(sib.textContent);
-      if (v !== null) res.unshift(v);
-      sib = sib.previousElementSibling;
-      hops += 1;
+  const CAPTION = '[class*=__caption]';
+  document.querySelectorAll(CAPTION).forEach(cap => {
+    const name = (cap.innerText || '').trim().toLowerCase();
+    let block = cap.parentElement;
+    for (let i = 0; i < 4 && block; i++) {
+      const h = num(block, 'home');
+      const a = num(block, 'away');
+      if (h !== null || a !== null) {
+        out[name] = {home: h, away: a};
+        return;
+      }
+      block = block.parentElement;
     }
-    return res;
-  };
-
-  // Find the Statistics section: the smallest element whose own text starts
-  // with the word, so label lookups stay inside the panel.
-  let statsRoot = null;
-  for (const el of document.querySelectorAll("body *")) {
-    if (/^statistics(\s|$)/i.test(ownText(el))) { statsRoot = el; break; }
+  });
+  // Possession and the card counts use their own value classes.
+  const poss = Array.from(document.querySelectorAll('.sr-mx-ballpossession__value'))
+    .map(e => (e.innerText || '').trim());
+  if (poss.length >= 2) {
+    const h = parseFloat(poss[0]);
+    const a = parseFloat(poss[1]);
+    if (!isNaN(h) && !isNaN(a)) out.possession_pct = {home: h, away: a};
   }
-  const scope = statsRoot || document.body;
-
-  for (const el of scope.querySelectorAll("*")) {
-    const label = ownText(el).toUpperCase();
-    if (!LABELS.includes(label)) continue;
-    if (label === "BALL POSSESSION" && out.possession_pct === undefined) {
-      const v = numsAfter(el);
-      if (v.length >= 2) out.possession_pct = pair(v[0], v[1]);
-    } else if (label === "CARDS" && out.yellow_cards === undefined) {
-      const after = numsAfter(el);
-      const before = numsBefore(el);
-      if (after.length >= 4) {
-        out.yellow_cards = pair(after[0], after[2]);
-        out.red_cards = pair(after[1], after[3]);
-      } else if (before.length >= 2 && after.length >= 2) {
-        out.yellow_cards = pair(before[0], after[0]);
-        out.red_cards = pair(before[1], after[1]);
-      } else if (before.length >= 4) {
-        out.yellow_cards = pair(before[0], before[2]);
-        out.red_cards = pair(before[1], before[3]);
-      }
-    } else if (label === "CORNERS" && out.corners === undefined) {
-      const v = numsAfter(el);
-      if (v.length >= 2) out.corners = pair(v[0], v[1]);
-    } else if (label === "ON TARGET" && out.shots_on_target === undefined) {
-      const v = numsAfter(el);
-      if (v.length >= 2) out.shots_on_target = pair(v[0], v[1]);
-    } else if (label === "SAVES" && out.saves === undefined) {
-      const v = numsAfter(el);
-      if (v.length >= 2) out.saves = pair(v[0], v[1]);
-    } else if (label === "ATTEMPTS" && out.attempts === undefined) {
-      const v = numsAfter(el);
-      if (v.length >= 2) out.attempts = pair(v[0], v[1]);
-    } else if (label === "FOULS" && out.fouls === undefined) {
-      const b = numsBefore(el);
-      if (b.length >= 2) out.fouls = pair(b[0], b[1]);
-      else {
-        const v = numsAfter(el);
-        if (v.length >= 2) out.fouls = pair(v[0], v[1]);
-      }
-    } else if (label === "OFFSIDES" && out.offsides === undefined) {
-      const b = numsBefore(el);
-      if (b.length >= 2) out.offsides = pair(b[0], b[1]);
-      else {
-        const v = numsAfter(el);
-        if (v.length >= 2) out.offsides = pair(v[0], v[1]);
-      }
-    } else if (label === "CONVERSION RATE" && out.conversion_rate === undefined) {
-      const v = numsAfter(el);
-      if (v.length >= 2) out.conversion_rate = pair(v[0], v[1]);
+  const cards = Array.from(document.querySelectorAll('.sr-mx-penaltycards__value'))
+    .map(e => (e.innerText || '').trim());
+  if (cards.length >= 4) {
+    const n = cards.map(v => parseFloat(v));
+    if (n.every(v => !isNaN(v))) {
+      out.yellow_cards = {home: n[0], away: n[2]};
+      out.red_cards = {home: n[1], away: n[3]};
     }
   }
   return JSON.stringify(out);
 })()
 """
+
 
 
 def panel_is_ready(

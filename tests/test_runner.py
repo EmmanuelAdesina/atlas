@@ -461,3 +461,29 @@ def test_an_ambiguous_cashout_offer_is_not_acted_on(ledger):
     vals = runner.handle_cashout_offers()
     assert vals == []
     assert driver.executed == []
+
+
+def test_multi_view_period_labels_are_understood():
+    """Multi View labels a half 'H1'/'H2'; the phase factor must recognise
+    them or the 35%-weight term is inert."""
+    from atlas.live.runner import LiveRunner
+
+    candidates = [
+        _cand(period="H2", minute=80.0, markets=10, i=0),
+        _cand(period="H1", minute=45.0, markets=10, i=1),
+    ]
+    chosen = LiveRunner.choose_match(candidates)
+    assert chosen is not None
+    assert chosen.period == "H2"
+
+
+def test_single_view_period_labels_are_understood():
+    from atlas.live.runner import LiveRunner
+
+    candidates = [
+        _cand(period="2nd Half", minute=80.0, markets=10, i=0),
+        _cand(period="1st Half", minute=45.0, markets=10, i=1),
+    ]
+    chosen = LiveRunner.choose_match(candidates)
+    assert chosen is not None
+    assert chosen.period == "2nd Half"

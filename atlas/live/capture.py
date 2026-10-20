@@ -204,11 +204,206 @@ class LiveCapture:
             return data if isinstance(data, dict) else {}
         return raw if isinstance(raw, dict) else {}
 
+    JS_OPEN_STATS = r"""
+    (() => {
+      const el = Array.from(document.querySelectorAll('*')).find(e =>
+        e.children.length === 0 && /^Statistics$/i.test((e.textContent||'').trim()));
+      if (!el) return JSON.stringify({ok: false, error: 'no statistics control'});
+      el.click();
+      return JSON.stringify({ok: true});
+    })()
+    """
+
+    JS_CLOSE_STATS = r"""
+    (() => {
+      // The Statistics panel REPLACES the market panel (its tabs go with
+      // it), so the market panel is restored with the 'Match Tracker'
+      // control, not by clicking a market tab.
+      const el = Array.from(document.querySelectorAll('*')).find(e =>
+        e.children.length === 0 && /^Match Tracker$/i.test((e.textContent||'').trim()));
+      if (!el) return JSON.stringify({ok: false});
+      el.click();
+      return JSON.stringify({ok: true});
+    })()
+    """
+
+    def close_stats_panel(self) -> bool:
+        """Return to the market panel after reading the statistics."""
+        try:
+            raw = self._evaluate(self.JS_CLOSE_STATS)
+        except CaptureError:
+            return False
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return bool(isinstance(data, dict) and data.get("ok"))
+
+    def read_stats(self) -> dict:
+        """Open the Statistics panel and read the live statistics.
+
+        The statistics are what the model's xG estimate is built from, and
+        without them the model runs on priors alone — which the calibration
+        then shrinks onto the book, leaving no edge. This read is the
+        difference between a model that can compete and one that cannot.
+        """
+        from atlas.live.extract import extract_stats_js
+
+        try:
+            self._evaluate(self.JS_OPEN_STATS)
+        except CaptureError:
+            return {}
+        # The panel loads asynchronously.
+        for _ in range(6):
+            time.sleep(0.8)
+            try:
+                raw = self._evaluate(extract_stats_js())
+            except CaptureError:
+                continue
+            if isinstance(raw, str):
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if data:
+                    return data
+            elif isinstance(raw, dict) and raw:
+                return raw
+        return {}
+
+    @staticmethod
+    def apply_stats(state: LiveMatchState, stats: dict) -> LiveMatchState:
+        """Fold the live statistics into the observed state."""
+        if not stats:
+            return state
+
+        def pair(name: str):
+            v = stats.get(name)
+            if not isinstance(v, dict):
+                return (None, None)
+            return (v.get("home"), v.get("away"))
+
+        poss_h, poss_a = pair("possession_pct")
+        sot_h, sot_a = pair("shots_on_target")
+        corners_h, corners_a = pair("corners")
+        att_h, att_a = pair("attempts")
+        saves_h, saves_a = pair("saves")
+        fouls_h, fouls_a = pair("fouls")
+        off_h, off_a = pair("offsides")
+        yc_h, yc_a = pair("yellow_cards")
+        rc_h, rc_a = pair("red_cards")
+
+        for team, values in (
+            (state.home, (poss_h, sot_h, corners_h, att_h, saves_h, fouls_h, off_h, yc_h, rc_h)),
+            (state.away, (poss_a, sot_a, corners_a, att_a, saves_a, fouls_a, off_a, yc_a, rc_a)),
+        ):
+            (
+                poss, sot, corners, att, saves, fouls, offsides, yc, rc
+            ) = values
+            if poss is not None:
+                team.possession_pct = poss
+            if sot is not None:
+                team.shots_on_target = sot
+            if corners is not None:
+                team.corners = corners
+            if att is not None:
+                team.shots_total = att
+            if saves is not None:
+                team.saves = saves
+            if fouls is not None:
+                team.fouls = fouls
+            if offsides is not None:
+                team.offsides = offsides
+            if yc is not None:
+                team.yellow_cards = yc
+            if rc is not None:
+                team.red_cards = rc
+        return state
+
+    JS_OPEN_MARKETS_TAB = r"""
+    (() => {
+      // The scoreboard lives in the market panel, so the panel must be the
+      // active tab. Opening the Statistics panel replaces it.
+      for (const name of ['Main', 'All']) {
+        const el = Array.from(document.querySelectorAll('*')).find(e =>
+          e.children.length === 0 && (e.textContent||'').trim() === name);
+        if (el) { el.click(); return JSON.stringify({ok: true, tab: name}); }
+      }
+      return JSON.stringify({ok: false});
+    })()
+    """
+
+    JS_FINISHED = r"""
+    (() => {
+      const t = document.body.innerText || '';
+      if (/Match Ended/i.test(t)) return JSON.stringify({ended: true});
+      const el = Array.from(document.querySelectorAll('*')).find(e =>
+        e.children.length === 0 && /^ENDED$/i.test((e.textContent||'').trim()));
+      return JSON.stringify({ended: !!el});
+    })()
+    """
+
+    def _panel_is_finished(self) -> bool:
+        """Has the focused match ended?
+
+        A finished match shows 'ENDED' / 'Match Ended' instead of a
+        scoreboard, so the score and clock cannot be read. The final score
+        is read separately from the result block.
+        """
+        try:
+            raw = self._evaluate(self.JS_FINISHED)
+        except CaptureError:
+            return False
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return bool(isinstance(data, dict) and data.get("ended"))
+
+    def open_markets_tab(self) -> bool:
+        """Make sure the market panel (and its scoreboard) is the active tab."""
+        try:
+            raw = self._evaluate(self.JS_OPEN_MARKETS_TAB)
+        except CaptureError:
+            return False
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return bool(isinstance(data, dict) and data.get("ok"))
+
+    def recover(self) -> bool:
+        """Recover a wedged browser tab.
+
+        The extension intermittently stops answering on the heavy live page
+        (the daemon returns 502). Navigating to a light page re-registers the
+        tab and the extension starts answering again, so the loop can
+        recover without human help.
+        """
+        try:
+            self.adapter.navigate(LIGHT_URL)
+        except Exception:
+            pass
+        time.sleep(2.5)
+        try:
+            self._evaluate(f"location.href={json.dumps(self.url)}; 1")
+        except CaptureError:
+            pass
+        time.sleep(3.0)
+        try:
+            self._evaluate("location.reload(); 1")
+        except CaptureError:
+            pass
+        time.sleep(2.0)
+        self._loaded = True
+        return True
+
     def capture(self, wait: bool = True) -> CaptureResult:
         """Read the focused match panel, waiting until it is ready."""
         deadline = time.monotonic() + (self.max_wait_s if wait else 0.0)
         reason = "not captured"
         media_hidden = False
+        recovered = False
         while True:
             try:
                 texts = self._snapshot_texts()
@@ -216,6 +411,11 @@ class LiveCapture:
                 reason = f"snapshot failed: {e}"
                 if time.monotonic() >= deadline:
                     return CaptureResult(False, reason, match_id=self.match_id)
+                # The extension wedges on the heavy page and stops answering.
+                # Recovering is cheaper than failing the cycle.
+                if not recovered:
+                    recovered = True
+                    self.recover()
                 time.sleep(self.poll_s)
                 continue
 
@@ -224,6 +424,15 @@ class LiveCapture:
             # The DOM is authoritative for the scoreboard: the accessibility
             # tree does not expose it.
             board = self.read_scoreboard()
+            if not board.get("period") and self._panel_is_finished():
+                board = {"period": "ft", "home_goals": board.get("home_goals"),
+                         "away_goals": board.get("away_goals")}
+            if not board.get("period"):
+                # The Statistics panel replaces the market panel (and its
+                # scoreboard), so put the market tab back and read again.
+                if self.open_markets_tab():
+                    time.sleep(1.0)
+                    board = self.read_scoreboard()
             if board:
                 if board.get("home_goals") is not None:
                     state.home.goals = board["home_goals"]
@@ -247,6 +456,13 @@ class LiveCapture:
                 state, raw_markets, min_markets=self.min_markets
             )
             if ready:
+                # The statistics are read LAST: opening the panel REPLACES
+                # the market panel, so the market list must be captured
+                # first and the panel restored afterwards.
+                stats = self.read_stats()
+                if stats:
+                    self.apply_stats(state, stats)
+                    self.close_stats_panel()
                 return CaptureResult(
                     True,
                     "ready",
@@ -283,20 +499,44 @@ class LiveCapture:
     JS_CARDS = r"""
     (() => {
       const out = [];
+      // Multi View: one row per live match, with explicit classes.
+      document.querySelectorAll('.match-row').forEach((row, i) => {
+        const t = (el) => {
+          const e = row.querySelector(el);
+          return e ? (e.innerText || '').trim() : '';
+        };
+        const home = t('.home-team');
+        const away = t('.away-team');
+        if (!home || !away) return;
+        const scores = Array.from(row.querySelectorAll('.score-item'))
+          .map(e => (e.innerText || '').trim()).filter(v => /^\d{1,2}$/.test(v));
+        const odds = Array.from(row.querySelectorAll('.m-outcome-odds')).length;
+        out.push({
+          i: i, home: home, away: away,
+          clock: t('.clock-time'), period: t('.game-id'),
+          score: scores.join(':'), odds: odds,
+          text: (row.innerText || '').trim().replace(/\n/g, ' ').slice(0, 120)
+        });
+      });
+      if (out.length) return JSON.stringify({rows: out, mode: 'multi'});
+
+      // Single View: a card per match.
       document.querySelectorAll('.sr-lmt-plus-scb__wrapper').forEach((c, i) => {
         const teams = Array.from(c.querySelectorAll('.sr-lmt-plus-scb__team-title'))
           .map(e => (e.innerText || '').trim()).filter(Boolean);
+        if (teams.length < 2) return;
         const period = ((c.querySelector('.sr-lmt-plus-scb__result-period') || {}).innerText || '').trim();
         const result = ((c.querySelector('.sr-lmt-plus-scb__result') || {}).innerText || '').trim();
-        // The card's mini-odds are a proxy for how deep the market list is.
+        const text = (c.innerText || '').trim();
         let odds = 0;
         c.querySelectorAll('*').forEach(e => {
           if (e.children.length === 0 && /^[0-9]{1,3}\.[0-9]{2}$/.test((e.textContent||'').trim())) odds++;
         });
-        const text = (c.innerText || '').trim();
-        if (teams.length >= 2) out.push({i, teams, period, result, odds, text});
+        out.push({i: i, home: teams[0], away: teams[1], clock: '', period: period,
+                  score: result.replace(/\n/g, ' '), odds: odds,
+                  text: text.replace(/\n/g, ' ').slice(0, 120)});
       });
-      return JSON.stringify(out);
+      return JSON.stringify({rows: out, mode: 'single'});
     })()
     """
 
@@ -321,27 +561,28 @@ class LiveCapture:
         except CaptureError:
             return []
         try:
-            entries = json.loads(raw) if isinstance(raw, str) else raw
+            data = json.loads(raw) if isinstance(raw, str) else raw
         except (TypeError, json.JSONDecodeError):
             return []
         out: list[BoardCandidate] = []
-        for e in entries or []:
-            teams = e.get("teams") or []
-            if len(teams) < 2:
+        for e in (data or {}).get("rows", []):
+            home = (e.get("home") or "").strip()
+            away = (e.get("away") or "").strip()
+            if not home or not away:
                 continue
             period = (e.get("period") or "").replace("\u00a0", " ").strip()
-            result = (e.get("result") or "").replace("\u00a0", " ").strip()
-            # The card's full text carries the status badge ('ENDED'), which
-            # is a sibling of the result element, not inside it.
-            card_text = (e.get("text") or "").replace("\u00a0", " ").strip()
+            clock = (e.get("clock") or "").replace("\u00a0", " ").strip()
+            minute = self._parse_minute(clock) if clock else None
+            if minute is None:
+                minute = self._parse_minute(period)
             out.append(
                 BoardCandidate(
                     match_id=f"board-{e.get('i', len(out))}",
-                    home_team=teams[0],
-                    away_team=teams[1],
-                    score=(card_text or result).replace("\n", " "),
-                    minute=self._parse_minute(period),
-                    period=period,
+                    home_team=home,
+                    away_team=away,
+                    score=(e.get("score") or e.get("text") or "").replace("\n", " "),
+                    minute=minute,
+                    period=period or clock,
                     num_markets=int(e.get("odds") or 0),
                     index=int(e.get("i", 0)),
                 )
@@ -379,12 +620,22 @@ class LiveCapture:
     JS_SELECT = r"""
     (() => {
       const target = %(index)d;
+      // Multi View: the row itself opens the match's market panel.
+      const rows = document.querySelectorAll('.match-row');
+      if (rows.length) {
+        const row = rows[target];
+        if (!row) return JSON.stringify({ok: false, error: 'no row'});
+        const cell = row.querySelector('.home-team') || row;
+        cell.click();
+        return JSON.stringify({ok: true, mode: 'multi'});
+      }
+      // Single View: a card per match.
       const cards = Array.from(document.querySelectorAll('.sr-lmt-plus-scb__wrapper'));
       const card = cards[target];
-      if (!card) return JSON.stringify({error: 'no card'});
+      if (!card) return JSON.stringify({ok: false, error: 'no card'});
       const clickable = card.querySelector('.sr-lmt-plus-scb__team-title') || card;
       clickable.click();
-      return JSON.stringify({ok: 1});
+      return JSON.stringify({ok: true, mode: 'single'});
     })()
     """
 

@@ -337,9 +337,12 @@ class LiveRunner:
 
         def phase_score(c) -> float:
             p = (getattr(c, "period", "") or "").upper()
-            if "2ND" in p or "2H" in p:
+            # The board labels a half as 'H1'/'H2' in Multi View and as
+            # '1st Half'/'2nd Half' in Single View; both must be recognised or
+            # the phase factor is inert.
+            if "2ND" in p or "2H" in p or p.startswith("H2"):
                 return 1.0
-            if "1ST" in p or "1H" in p:
+            if "1ST" in p or "1H" in p or p.startswith("H1"):
                 return 0.7
             if "HT" in p or "HALF" in p:
                 return 0.5
