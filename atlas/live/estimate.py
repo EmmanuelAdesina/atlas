@@ -614,6 +614,26 @@ class LiveStateSpaceModel:
         )
 
 
+def _lo(calibrated_p: float, base_lower: Optional[float]) -> Optional[float]:
+    """Lower bound of the calibrated interval.
+
+    The shrink pulls the probability toward the market, which can take it
+    BELOW the base model's own lower bound. The interval must stay
+    coherent, or the 'conservative' EV is computed from a higher
+    probability than the headline and the betting gate inverts.
+    """
+    if base_lower is None:
+        return calibrated_p
+    return min(calibrated_p, base_lower)
+
+
+def _hi(calibrated_p: float, base_upper: Optional[float]) -> Optional[float]:
+    """Upper bound of the calibrated interval."""
+    if base_upper is None:
+        return calibrated_p
+    return max(calibrated_p, base_upper)
+
+
 @dataclass
 class CalibratedModel:
     """Wraps a base MarketModel with market-implied calibration.
@@ -706,7 +726,8 @@ class CalibratedModel:
                 model_name=self.model_name,
                 evidence_age_s=base.evidence_age_s,
                 abstain_reason=f"model-market gap too large ({gap_pp:.1f}pp > 5pp), blocking bet",
-                p_lower=base.p_lower, p_upper=base.p_upper,
+                p_lower=_lo(calibrated_p, base.p_lower),
+                p_upper=_hi(calibrated_p, base.p_upper),
                 p_push=base.p_push, p_half_win=base.p_half_win,
                 p_half_loss=base.p_half_loss,
                 diagnostics={
@@ -722,7 +743,8 @@ class CalibratedModel:
             confidence=base.confidence,
             model_name=self.model_name,
             evidence_age_s=base.evidence_age_s,
-            p_lower=base.p_lower, p_upper=base.p_upper,
+            p_lower=_lo(calibrated_p, base.p_lower),
+            p_upper=_hi(calibrated_p, base.p_upper),
             p_push=base.p_push, p_half_win=base.p_half_win,
             p_half_loss=base.p_half_loss,
             diagnostics={
