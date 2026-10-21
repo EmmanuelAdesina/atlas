@@ -48,7 +48,10 @@ class WebBridgeAdapter:
         if action not in ALLOWED_ACTIONS:
             raise WebBridgeError(f"refusing undocumented action {action!r}")
         body = {"action": action, "args": args, "session": self.session}
-        client = self.client or httpx.Client(timeout=60.0)
+        # A wedged extension makes the daemon wait out its own timeout before
+        # answering 502. A short client timeout keeps the loop responsive:
+        # it is better to fail fast and recover than to wait.
+        client = self.client or httpx.Client(timeout=20.0)
         try:
             resp = client.post(self.daemon_url, json=body)
             resp.raise_for_status()

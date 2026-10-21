@@ -89,6 +89,10 @@ class LiveCapture:
         # Scales the waits in the recovery path so tests do not pay for them.
         self.pause_scale = max(0.0, pause_scale)
         self._loaded = False
+        # Consecutive failed probes: after a few, the session is treated as
+        # dead rather than flaky, so the loop fails fast instead of waiting
+        # out the daemon's timeout on every call.
+        self._consecutive_failures = 0
 
     # --- browser primitives ---------------------------------------------
 
@@ -111,11 +115,20 @@ class LiveCapture:
         for attempt in range(retries + 1):
             try:
                 data = self._unwrap(self.adapter.evaluate(code))
+                self._consecutive_failures = 0
                 if isinstance(data, dict) and "value" in data:
                     return data["value"]
                 return data
             except Exception as e:  # the extension intermittently fails
                 last = e
+                self._consecutive_failures += 1
+                if self._consecutive_failures >= 2:
+                    # The session is dead, not flaky. Every further probe
+                    # would wait out the daemon's own timeout, so fail fast
+                    # and let the supervisor recover instead.
+                    raise CaptureError(
+                        f"the browser session is not responding ({e})"
+                    ) from e
                 time.sleep(1.5 * self.pause_scale)
         raise CaptureError(f"evaluate failed: {last}")
 
@@ -470,6 +483,14 @@ class LiveCapture:
         """
         navigated = False
         try:
+            # A FROZEN tab cannot be navigated: the navigation is queued to
+            # the page, and the page's JS thread is what is stuck. Closing the
+            # session discards the frozen tab, and a fresh one is healthy.
+            try:
+                self.adapter.close_session()
+                time.sleep(1.5 * self.pause_scale)
+            except Exception:
+                pass
             self.adapter.navigate(LIGHT_URL)
             navigated = True
         except Exception:
@@ -495,6 +516,39 @@ class LiveCapture:
         time.sleep(3.0 * self.pause_scale)
         self._loaded = True
         return True
+
+    def open_match(self, url: str, wait_s: float = 25.0) -> bool:
+        """Open a match by its DIRECT url and wait for its panel.
+
+        The board's match LIST is the flakiest part of the site: it renders
+        progressively, it redirects between sports, and it intermittently
+        delivers nothing at all. A match url is stable, so once a match is
+        known the loop can work it directly instead of re-deriving it from
+        the list every cycle.
+        """
+        try:
+            self._evaluate(f"location.href={json.dumps(url)}; 1")
+        except CaptureError:
+            return False
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            time.sleep(2.0)
+            try:
+                if self.read_markets_dom():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def match_url(self) -> Optional[str]:
+        """The url of the match currently open, if it is a match page."""
+        try:
+            href = self._evaluate("location.href")
+        except CaptureError:
+            return None
+        if isinstance(href, str) and "/sr:match:" in href:
+            return href
+        return None
 
     def read_markets_dom(self) -> list[dict]:
         """Read the markets from the DOM.

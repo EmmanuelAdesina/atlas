@@ -390,6 +390,55 @@ def cmd_posture(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_supervise(args: argparse.Namespace) -> int:
+    """Run the supervisor: the LLM that handles the exception path.
+
+    The supervisor drives the browser for the things the deterministic loop
+    cannot handle (an expired session, an unexpected page, a wedged
+    extension) and writes the operator notifications. It has no money tool:
+    it can never place a bet.
+    """
+    from atlas.browser.webbridge import WebBridgeAdapter
+    from atlas.live.capture import LiveCapture
+    from atlas.live.supervisor import LLMClient, Supervisor
+    from atlas.ops.notify import Notifier
+
+    adapter = WebBridgeAdapter(session=args.session)
+    capture = LiveCapture(adapter, min_markets=args.min_markets, max_wait_s=45)
+    notifier = Notifier(log_path=args.notifications, console=True)
+    client = LLMClient()
+    if not client.configured and not args.no_llm:
+        console.print(
+            "[yellow]No ATLAS_BOSS_API_KEY: only the deterministic supervisor "
+            "(session re-login) will run.[/yellow]"
+        )
+    supervisor = Supervisor(
+        capture=capture, notifier=notifier, client=client,
+        audit_path=args.audit_log,
+    )
+    try:
+        result = capture.capture()
+    except Exception as e:
+        console.print(f"[yellow]capture failed: {e}[/yellow]")
+        result = None
+    try:
+        page = supervisor.tools.read_page()
+    except Exception as e:
+        page = {"error": str(e)}
+    console.print(f"Page: {json.dumps(page, default=str)[:400]}")
+    from atlas.live.capture import CaptureResult
+
+    if result is None:
+        result = CaptureResult(False, "the browser session is not responding")
+    outcome = supervisor.handle(result, task=args.task)
+    console.print(f"[bold]{outcome.describe()}[/bold]")
+    for a in outcome.actions:
+        console.print(f"  {a.tool} -> {str(a.result)[:160]}")
+    if outcome.message:
+        console.print(f"  message: {outcome.message}")
+    return 0 if outcome.handled else 1
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Run the autonomous live loop.
 
@@ -402,6 +451,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     from atlas.browser.cashout import CashoutDriver
     from atlas.browser.webbridge import WebBridgeAdapter
     from atlas.live.decisions import PolicyConfig
+    from atlas.live.supervisor import LLMClient, Supervisor
     from atlas.live.capture import LiveCapture
     from atlas.live.runner import LiveRunner
     from atlas.ops.ledger import BetLedger, LedgerConfig
@@ -445,12 +495,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         allow_execution=args.submit,
         bankroll_ngn=args.bankroll,
     )
+    # The supervisor handles the exception path: an expired session, an
+    # unexpected page, a wedged browser. It has no money tool, so it can
+    # never place a bet.
+    supervisor = Supervisor(
+        capture=capture,
+        notifier=notifier,
+        client=LLMClient(),
+        audit_path=args.supervisor_log,
+    )
     runner = LiveRunner(
         capture=capture,
         ledger=ledger,
         notifier=notifier,
         betslip=betslip,
         cashout_driver=cashout_driver,
+        supervisor=supervisor,
         posture=posture,
         policy=policy,
         cycle_s=args.cycle_seconds,
@@ -839,6 +899,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     posture_cmd.set_defaults(func=cmd_posture)
 
+    sup = sub.add_parser(
+        "supervise",
+        help="Run the supervisor: the LLM that handles the exception path",
+    )
+    sup.add_argument("--task", default=None, help="What the supervisor should do")
+    sup.add_argument("--session", default="atlas-live", help="WebBridge session")
+    sup.add_argument("--min-markets", type=int, default=10, help="Markets for a ready panel")
+    sup.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Deterministic supervisor only (no LLM call)",
+    )
+    sup.add_argument(
+        "--audit-log",
+        default="data/decisions/supervisor.jsonl",
+        help="Supervisor action audit log",
+    )
+    sup.add_argument(
+        "--notifications",
+        default="data/decisions/notifications.jsonl",
+        help="Notification audit log",
+    )
+    sup.set_defaults(func=cmd_supervise)
+
     run = sub.add_parser(
         "run",
         help="Run the autonomous live loop (capture -> price -> plan -> place -> settle)",
@@ -910,6 +994,11 @@ def build_parser() -> argparse.ArgumentParser:
              "cannot justify a NGN 100 minimum bet on a small bankroll.",
     )
     run.add_argument(
+        "--supervisor-log",
+        default="data/decisions/supervisor.jsonl",
+        help="Supervisor action audit log",
+    )
+    run.add_argument(
         "--decision-log",
         default="data/decisions/loop_decisions.jsonl",
         help="Where every cycle's decisions are logged",
@@ -933,6 +1022,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except Exception:
+        pass
     parser = build_parser()
     args = parser.parse_args()
     if not getattr(args, "command", None):

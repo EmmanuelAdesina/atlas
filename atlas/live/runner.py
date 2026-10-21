@@ -100,6 +100,7 @@ class LiveRunner:
         notifier: Optional[Notifier] = None,
         betslip: Any = None,
         cashout_driver: Any = None,
+        supervisor: Any = None,
         posture: Optional[Posture] = None,
         policy: Optional[PolicyConfig] = None,
         cycle_s: float = 30.0,
@@ -113,6 +114,7 @@ class LiveRunner:
         self.notifier = notifier
         self.betslip = betslip
         self.cashout_driver = cashout_driver
+        self.supervisor = supervisor
         self.policy = policy
         self.posture = posture or posture_for_mode("balanced")
         self.cycle_s = cycle_s
@@ -559,17 +561,32 @@ class LiveRunner:
             return report
 
         # P0: an expired session is a distinct failure from a busy board.
-        # The operator must be told, because no bet can be placed until the
-        # session is restored.
+        # The operator must be told, and the supervisor tries to restore it:
+        # the known case is handled deterministically (no model needed), and
+        # the model is the fallback for the cases nobody has seen.
         if "session expired" in (result.reason or ""):
             if self.notifier is not None:
                 self.notifier.critical(
                     "SportyBet session expired",
-                    "the board is showing the login form — re-login is needed; "
-                    "the loop will keep running and will not place bets",
+                    "the board is showing the login form — restoring the session; "
+                    "no bet can be placed until it is back",
                     cycle=self.cycle,
                 )
-            report.reason = result.reason
+            if self.supervisor is not None:
+                outcome = self.supervisor.handle(result)
+                report.reason = f"{result.reason} | {outcome.describe()}"
+                if outcome.handled:
+                    # The session is back: retry the cycle immediately.
+                    retry = self.capture.capture()
+                    if retry.ready and retry.state is not None:
+                        result = retry
+                        report.reason = "session restored, cycle continued"
+                    else:
+                        report.reason = f"session restored: {result.reason}"
+                else:
+                    report.reason = result.reason
+            else:
+                report.reason = result.reason
             self.reports.append(report)
             return report
 

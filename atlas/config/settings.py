@@ -4,7 +4,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # The .env also carries ATLAS_* keys that are read directly from the
+    # environment by the components that own them (the LLM client, the
+    # notifier, the supervisor), so unknown keys are ignored here rather
+    # than rejected.
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     # API Keys
     football_data_api_key: Optional[str] = None
@@ -26,6 +32,20 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+
+    # --- LLM supervisor / posture proposer -------------------------------
+    # Any OpenAI-compatible endpoint works (OpenRouter, OpenAI, a local
+    # server). The model is only used for the exception path and for
+    # natural-language posture; it never prices a bet.
+    boss_api_key: Optional[str] = None
+    boss_base_url: str = "https://api.openai.com/v1"
+    boss_model: str = "gpt-4o-mini"
+
+    # --- SportyBet session -----------------------------------------------
+    # The supervisor re-logs in when the session expires. The credentials
+    # live here so they never enter a model's context.
+    sportybet_phone: Optional[str] = None
+    sportybet_password: Optional[str] = None
 
 
 settings = Settings()
