@@ -41,6 +41,19 @@ daemon:
 
 The daemon must report `extension_connected: true`.
 
+Two things that will otherwise cost you an afternoon:
+
+- **The extension only drives the FOREGROUND tab.** Every command for a
+  background tab is sent and never executed, and the daemon answers 502.
+  Keep the browser on the SportyBet tab, or run it headful and unfocused
+  but with the tab active. If ATLAS reports "the browser session is not
+  responding", click the SportyBet tab before anything else.
+- **Keep the extension and the daemon on the same version.** The extension
+  auto-updates; the daemon does not. When they drift, the daemon sends
+  commands the extension ignores, with the same 502 and no other symptom.
+  `kimi-webbridge upgrade` (or install the binary by hand and check the
+  sha256 against the manifest) after any extension update.
+
 ## 4. Services
 
 ```bash

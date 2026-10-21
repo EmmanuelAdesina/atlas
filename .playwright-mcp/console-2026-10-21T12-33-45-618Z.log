@@ -1,0 +1,241 @@
+[  103674ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://s.sporty.net/global/main/common/font/assets/Inter-Regular.a1db723976.ttf:0
+[  103741ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://www.googletagmanager.com/gtm.js?id=GTM-5WW5PS9&l=gtmDataLayer:0
+[  103743ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://s.sporty.net/global/main/main-desktop/8692.009b9440ac.js:0
+[  103743ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://s.sporty.net/global/main/main-desktop/27107.7fe51e2630.js:0
+[  103744ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:0
+[  103775ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://s.sporty.net/global/main/modules/main/desktop/preMatch/index.77fa998d98.js:0
+[  103776ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:0
+[  105976ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://cdn.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:0
+[  105988ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://cdn.sporty.net/global/main/main-desktop/27107.7fe51e2630.js:0
+[  105989ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://cdn.sporty.net/global/main/modules/main/desktop/preMatch/index.77fa998d98.js:0
+[  105990ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://cdn.sporty.net/global/main/main-desktop/8692.009b9440ac.js:0
+[  105990ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://cdn.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:0
+[  106029ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/logo/favicon.ico:0
+[  181942ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://ad.doubleclick.net/ccm/s/collect?_gsid=K4BDmcyKowawvZYrmw7Jt5f7X5IT2rkVkQ&auid=231402590.1792586169&gtm=45He6aj1v831284353za200zd831284353xeaxf1&fmt=8:0
+[  183693ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://www.google.com/ccm/collect?rcb=8&frm=0&apvc=1&ae=g&auid=231402590.1792586169&dt=Online%20Sports%20Betting%20Nigeria%20%26%20Live%20Betting%20Odds%20at&en=page_view&dl=https%3A%2F%2Fwww.sportybet.com%2Fng%2Fsport%2Ffootball&scrsrc=www.googletagmanager.com&rnd=1900519895.1792586169&navt=r&npa=0&ep.ads_data_redaction=0&gtm=45He6aj1v831284353za200zd831284353xeaxf1&gcd=13l3l3l3l1l1&dma=0&tag_exp=115938466~115938468~117776795~118131810~118897920~118897930~120385423~120469145~120469153~121049589~121246026~121246034&tft=1792586169084&tfd=7293&_gsid=K4BDmcyKowawvZYrmw7Jt5f7X5IT2rkVkQ&fmt=8:0
+[  192754ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.googletagmanager.com/gtag/js?id=AW-634323952&l=gtmDataLayer&cx=c&gtm=4e6aj1:0
+[  207223ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_RESET @ https://www.googletagmanager.com/gtag/js?id=G-00HZ52K43N&l=gtmDataLayer&cx=c&gtm=4e6aj1:0
+[  234919ms] [INFO] Slow network is detected. See https://www.chromestatus.com/feature/5636954674692096 for more details. Fallback font will be used while loading: https://s.sporty.net/global/main/modules/main/desktop/sporty/font/Roboto-Regular.ae3a8db937.ttf @ https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748
+[  235056ms] [VERBOSE] [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o @ https://www.sportybet.com/ng/sport/football:0
+[  237989ms] [INFO] Slow network is detected. See https://www.chromestatus.com/feature/5636954674692096 for more details. Fallback font will be used while loading: https://s.sporty.net/global/main/common/style/fonts/Roboto-Bold.88d61d57d5.ttf @ https://www.sportybet.com/ng/sport/football:0
+[  263757ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://www.sportybet.com/api/ng//www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents?productId=3&sportId=sr%3Asport%3A1&marketId=1,18,10,29,11,26,36,14,60100&pageSize=100&pageNum=1&option=1&startTime=1792586289125&endTime=1792597089125&order=1&_t=1792586289125:0
+[  270904ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://www.sportybet.com/api/ng//www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents?productId=3&sportId=sr%3Asport%3A1&marketId=1&pageSize=100&pageNum=1&option=1&startTime=1792586296317&endTime=1792597096317&order=1&_t=1792586296317:0
+[  294497ms] [ERROR] Failed to load resource: the server responded with a status of 404 () @ https://www.sportybet.com/api/ng//www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents?productId=3&sportId=sr%3Asport%3A1&marketId=1&pageSize=50&pageNum=1&option=1&startTime=1792586319842&endTime=1792597119842&order=1&_t=1792586319842:0
+[  375294ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  383826ms] [ERROR] Failed to load resource: net::ERR_NETWORK_CHANGED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792586380206:0
+[  383853ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[  383980ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  383981ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  386163ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792586410202:0
+[  386175ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[  387685ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  392699ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  397715ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  860981ms] [ERROR] Failed to load resource: net::ERR_NETWORK_CHANGED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792586860210:0
+[  860986ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  861014ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[  861139ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  863165ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  864877ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792586890201:0
+[  864902ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[  867438ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  872459ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  878199ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  988870ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  991972ms] [ERROR] Failed to load resource: net::ERR_ADDRESS_UNREACHABLE @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792586980200:0
+[  991994ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[  992021ms] [ERROR] Failed to load resource: net::ERR_ADDRESS_UNREACHABLE @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792587010205:0
+[  992070ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[  992136ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  992224ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[  997471ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1002591ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1315647ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_CLOSED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792587340210:0
+[ 1315700ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 1330441ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1339466ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket opening handshake timed out @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1346223ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1346836ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792587370201:0
+[ 1346886ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 1350235ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1554812ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_CLOSED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792587580202:0
+[ 1554855ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 1769203ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1774824ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792587760200:0
+[ 1774882ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 1778285ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket opening handshake timed out @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1790384ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1799364ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_ABORTED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792587790204:0
+[ 1799403ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 1799400ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_ABORTED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792587820201:0
+[ 1799446ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 1799401ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1804462ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1809530ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1999111ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1999862ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 1999863ms] [ERROR] Failed to load resource: net::ERR_ADDRESS_UNREACHABLE @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588000207:0
+[ 1999963ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2002358ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2004802ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588030198:0
+[ 2004816ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2005927ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2010998ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2122472ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2131837ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket opening handshake timed out @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2144077ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2408969ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2408970ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2410623ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588420209:0
+[ 2410641ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2411132ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2414320ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2419353ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2435538ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2435727ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588450200:0
+[ 2435730ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2440546ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2445556ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2450567ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2460595ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588480200:0
+[ 2460595ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2461586ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2466595ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2471600ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2484601ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588510205:0
+[ 2484602ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2487749ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2492882ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2498007ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2509029ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2514036ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2514593ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588540201:0
+[ 2514594ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2519063ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2530148ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2535215ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2540279ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2551494ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2555796ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588570204:0
+[ 2555797ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2556566ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2561844ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2567212ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2574773ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588600198:0
+[ 2574787ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2584674ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2590965ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2602129ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2604588ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588630199:0
+[ 2604589ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2607167ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2667103ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2667103ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588690212:0
+[ 2667131ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2670306ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2675443ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2802123ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2802123ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2824674ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2831872ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588810208:0
+[ 2831893ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2845400ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588840208:0
+[ 2845403ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2846919ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2871937ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2874790ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588870206:0
+[ 2874808ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2896949ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2905309ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588900211:0
+[ 2905344ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2906125ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588930199:0
+[ 2906137ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2921965ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2935384ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792588960198:0
+[ 2935400ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 2946985ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2957444ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 2962482ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3324858ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_CLOSED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792589350205:0
+[ 3325031ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 3448118ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3448814ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3455808ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3455820ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792589470329:0
+[ 3455928ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 3460187ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3484936ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3494415ms] [ERROR] Failed to load resource: net::ERR_ADDRESS_UNREACHABLE @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792589500212:0
+[ 3494502ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 3494629ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3748678ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3758918ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket opening handshake timed out @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3770485ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3784831ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792589770203:0
+[ 3784857ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 3795511ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3805106ms] [ERROR] Failed to load resource: net::ERR_TIMED_OUT @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792589800200:0
+[ 3805144ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 3820234ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3829771ms] [ERROR] Failed to load resource: net::ERR_NETWORK_CHANGED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792589830204:0
+[ 3829797ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 3829895ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_CONNECTION_ABORTED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3834757ms] [ERROR] Failed to load resource: net::ERR_NAME_NOT_RESOLVED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792589860208:0
+[ 3834771ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 3834932ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3840180ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3845463ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 3850519ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 4164702ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_CLOSED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792590190199:0
+[ 4164757ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 4254938ms] [ERROR] Failed to load resource: net::ERR_CONNECTION_CLOSED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792590280201:0
+[ 4254944ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)
+[ 4378195ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 4380476ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 4381618ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 4383813ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 4387501ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_NAME_NOT_RESOLVED @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 4502575ms] [WARNING] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: WebSocket is closed before the connection is established. @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 4509299ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 4509563ms] [ERROR] WebSocket connection to 'wss://alive-ng.sportybet.com/socket.io/?EIO=3&transport=websocket' failed: Error in connection establishment: net::ERR_ADDRESS_UNREACHABLE @ https://s.sporty.net/global/main/modules/main/desktop/common/base/base.173931f6d0.js:1072
+[ 4509907ms] [ERROR] Failed to load resource: net::ERR_NETWORK_CHANGED @ https://www.sportybet.com/api/ng/factsCenter/popularAndSportList?sportId=sr%3Asport%3A1&_t=1792590520205:0
+[ 4510083ms] Uncaught (in promise) #<Object>
+    at <anonymous> (https://s.sporty.net/global/main/modules/main/desktop/common/core/core.a6f45f4630.js:15748:681392)

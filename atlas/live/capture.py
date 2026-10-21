@@ -126,8 +126,17 @@ class LiveCapture:
                     # The session is dead, not flaky. Every further probe
                     # would wait out the daemon's own timeout, so fail fast
                     # and let the supervisor recover instead.
+                    #
+                    # The usual cause is that the extension only drives a
+                    # FOREGROUND tab: if the operator has moved to another
+                    # tab or window, the commands are sent and never
+                    # executed. That is worth saying, because it is the
+                    # difference between "restart the browser" and "click
+                    # the SportyBet tab".
                     raise CaptureError(
-                        f"the browser session is not responding ({e})"
+                        "the browser session is not responding — the tab may "
+                        "need to be in the foreground (the extension only "
+                        f"drives the visible tab): {e}"
                     ) from e
                 time.sleep(1.5 * self.pause_scale)
         raise CaptureError(f"evaluate failed: {last}")
