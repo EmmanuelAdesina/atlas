@@ -1,0 +1,81 @@
+{
+  "comment": "Audit sidecar for report.json. Every odds quote below was recovered verbatim from the edge-AI report's own text (cross_family_pairs_tested labels, families_rejected reasons, tactical_rationale, notes). The edge-AI did NOT attach the raw 215-market board, so only these markets are independently reconstructible; scraping fidelity cannot be audited from the report alone.",
+  "families": {
+    "1x2": {"Home": 3.25, "Draw": 3.00, "Away": 2.40},
+    "1x2_1h": {"Home": 4.00, "Draw": 1.99, "Away": 3.10},
+    "1x2_2h": {"Home": 3.50, "Draw": 2.35, "Away": 2.80},
+    "double_chance": {"Home or Draw": 1.53, "Home or Away": 1.37, "Draw or Away": 1.32},
+    "1h_double_chance": {"Home or Draw": 1.34, "Home or Away": 1.71, "Draw or Away": 1.24},
+    "2h_double_chance": {"Home or Draw": 1.40, "Home or Away": 1.54, "Draw or Away": 1.29},
+    "1x2_never_down": {"Home Never Down": 3.53, "middle leg (label not quoted)": 3.00, "Away Never Down": 2.60},
+    "handicap_home_plus_0_5": {"Home +0.5": 1.57},
+    "1h_handicap_home_plus_0_5": {"Home +0.5": 1.37},
+    "btts": {"No": 1.74},
+    "away_no_bet": {"Draw": 1.76}
+  },
+  "shin_z_key_map": {
+    "1x2": "1x2",
+    "1x2_1h": "1h_1x2",
+    "1x2_2h": "2h_1x2"
+  },
+  "claimed_booksums": {
+    "1x2": 1.057692,
+    "1x2_1h": 1.075093,
+    "1x2_2h": 1.068389,
+    "double_chance": 2.1411,
+    "1h_double_chance": 2.1375,
+    "2h_double_chance": 2.1388,
+    "1x2_never_down": 1.0012,
+    "odd_even": 1.052486
+  },
+  "claimed_booksums_not_reconstructible": {
+    "1x2_1up": 1.4059,
+    "1x2_2up": 1.1219,
+    "draw_no_bet": 1.0680,
+    "1h_draw_no_bet": 1.0463,
+    "2h_draw_no_bet": 1.0499,
+    "home_no_bet": 1.0902,
+    "away_no_bet": 1.0890
+  },
+  "claimed_shin_fair_1x2": {"Home": 0.2891, "Draw": 0.3144, "Away": 0.3965},
+  "ev_legs": [
+    {"label": "DC Home or Draw @1.53", "odds": 1.53, "p_from": "1x2:Home+Draw"},
+    {"label": "DC Home or Away @1.37", "odds": 1.37, "p_from": "1x2:Home+Away"},
+    {"label": "DC Draw or Away @1.32", "odds": 1.32, "p_from": "1x2:Draw+Away"},
+    {"label": "1H DC Home or Draw @1.34", "odds": 1.34, "p_from": "1x2_1h:Home+Draw"},
+    {"label": "1H DC Home or Away @1.71", "odds": 1.71, "p_from": "1x2_1h:Home+Away"},
+    {"label": "1H DC Draw or Away @1.24", "odds": 1.24, "p_from": "1x2_1h:Draw+Away"},
+    {"label": "2H DC Home or Draw @1.40", "odds": 1.40, "p_from": "1x2_2h:Home+Draw"},
+    {"label": "2H DC Home or Away @1.54", "odds": 1.54, "p_from": "1x2_2h:Home+Away"},
+    {"label": "2H DC Draw or Away @1.29", "odds": 1.29, "p_from": "1x2_2h:Draw+Away"},
+    {"label": "Main Handicap Home +0.5 @1.57", "odds": 1.57, "p_from": "1x2:Home+Draw"},
+    {"label": "1H Handicap Home +0.5 @1.37", "odds": 1.37, "p_from": "1x2_1h:Home+Draw"},
+    {"label": "BTTS No @1.74 (model-priced: indep-Poisson from 1X2 lambdas)", "odds": 1.74, "p_from": "model:btts_no"}
+  ],
+  "prose_claims": [
+    {
+      "id": "trap_away_no_bet",
+      "description": "1x2 Draw @3.00 + 'Away No Bet: Draw' @1.76 implied sum (tactical_rationale trap 2)",
+      "claimed": 0.8759,
+      "computed_from": {"1x2 Draw": 3.00, "Away No Bet: Draw": 1.76},
+      "decision_relevant": false,
+      "expected_note": "if mismatch: either the odds or the sum is misquoted; the structural conclusion (ANB voids on away win, not a cover) is unaffected either way"
+    },
+    {
+      "id": "trap_btts_union",
+      "description": "1x2 Draw @3.00 + BTTS No @1.74 implied sum (tactical_rationale trap 3)",
+      "claimed": 0.9080,
+      "computed_from": {"1x2 Draw": 3.00, "BTTS No": 1.74},
+      "decision_relevant": false
+    },
+    {
+      "id": "best_guaranteed_return",
+      "description": "Best achievable guaranteed return per unit on a true cover (Odd/Even, booksum 1.052486)",
+      "claimed": 0.9470,
+      "computed_from": {"booksum": 1.052486},
+      "formula": "1.0 / booksum",
+      "decision_relevant": false,
+      "expected_note": "if mismatch: report likely subtracted the overround from 1 instead of dividing by the booksum"
+    }
+  ]
+}
