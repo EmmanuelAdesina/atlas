@@ -107,6 +107,7 @@ class Posture:
     max_exposure_per_match: float = 3_000.0
     max_bets_per_snapshot: int = 2
     max_stake_per_bet: float = 1_000.0
+    min_stake_ngn: float = 100.0
     cashout_min_discount: float = 0.0
     require_guaranteed_profit: bool = False
     rationale: str = "default posture"
@@ -143,6 +144,7 @@ class Posture:
             "max_exposure_per_match": self.max_exposure_per_match,
             "max_bets_per_snapshot": self.max_bets_per_snapshot,
             "max_stake_per_bet": self.max_stake_per_bet,
+            "min_stake_ngn": self.min_stake_ngn,
             "cashout_min_discount": self.cashout_min_discount,
             "require_guaranteed_profit": self.require_guaranteed_profit,
             "rationale": self.rationale,
@@ -179,7 +181,7 @@ class Posture:
         return SequentialConfig(
             kelly_fraction=self.kelly_fraction,
             bankroll_ngn=config.bankroll_ngn,
-            min_stake_ngn=config.min_stake_ngn,
+            min_stake_ngn=self.min_stake_ngn,
             max_stake_per_bet=self.max_stake_per_bet,
             max_exposure_per_match=self.max_exposure_per_match,
             max_bets_per_match=config.max_bets_per_match,
@@ -352,6 +354,7 @@ class LLMProposer:
             ),
             max_bets_per_snapshot=int(data.get("max_bets_per_snapshot", 2) or 2),
             max_stake_per_bet=float(data.get("max_stake_per_bet", 1000.0) or 1000.0),
+            min_stake_ngn=float(data.get("min_stake_ngn", 100.0) or 100.0),
             cashout_min_discount=float(
                 data.get("cashout_min_discount", 0.0) or 0.0
             ),

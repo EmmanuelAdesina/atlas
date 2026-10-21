@@ -157,6 +157,9 @@ class Opportunity:
     odds: float
     model_p: float
     model_name: str = "unspecified"
+    # The market's title on the book, used to find the selection again on the
+    # slip: the price may move, the name does not.
+    market_label: str = ""
     p_lower: Optional[float] = None
     p_push: float = 0.0
     ev: float = field(init=False)

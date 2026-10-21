@@ -37,6 +37,16 @@ class FakeSlip:
         self.added.append(odds)
         return {"ok": True}
 
+    def add_selection(self, market_label, selection):
+        self.added.append((market_label, selection))
+        return {"ok": True}
+
+    def slip_is_empty(self):
+        return True
+
+    def accept_changes(self):
+        return {"ok": True}
+
     def set_stake(self, stake):
         self.stakes.append(stake)
         return {"ok": True}

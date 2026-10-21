@@ -78,6 +78,7 @@ class LiveCapture:
         max_wait_s: float = 90.0,
         min_markets: int = 10,
         match_id: str = "live",
+        pause_scale: float = 1.0,
     ) -> None:
         self.adapter = adapter
         self.url = url
@@ -85,6 +86,8 @@ class LiveCapture:
         self.max_wait_s = max_wait_s
         self.min_markets = min_markets
         self.match_id = match_id
+        # Scales the waits in the recovery path so tests do not pay for them.
+        self.pause_scale = max(0.0, pause_scale)
         self._loaded = False
 
     # --- browser primitives ---------------------------------------------
@@ -113,7 +116,7 @@ class LiveCapture:
                 return data
             except Exception as e:  # the extension intermittently fails
                 last = e
-                time.sleep(1.5)
+                time.sleep(1.5 * self.pause_scale)
         raise CaptureError(f"evaluate failed: {last}")
 
     def _snapshot_texts(self) -> list[str]:
@@ -340,7 +343,7 @@ class LiveCapture:
             return {}
         # The panel loads asynchronously.
         for _ in range(6):
-            time.sleep(0.8)
+            time.sleep(0.8 * self.pause_scale)
             try:
                 raw = self._evaluate(extract_stats_js())
             except CaptureError:
@@ -472,24 +475,24 @@ class LiveCapture:
         except Exception:
             pass
         if navigated:
-            time.sleep(2.5)
+            time.sleep(2.5 * self.pause_scale)
             # The tab re-registers asynchronously; wait for it to answer.
             for _ in range(6):
                 try:
                     self._evaluate("1")
                     break
                 except CaptureError:
-                    time.sleep(1.5)
+                    time.sleep(1.5 * self.pause_scale)
         try:
             self._evaluate(f"location.href={json.dumps(self.url)}; 1")
         except CaptureError:
             pass
-        time.sleep(4.0)
+        time.sleep(4.0 * self.pause_scale)
         try:
             self._evaluate("location.reload(); 1")
         except CaptureError:
             pass
-        time.sleep(3.0)
+        time.sleep(3.0 * self.pause_scale)
         self._loaded = True
         return True
 

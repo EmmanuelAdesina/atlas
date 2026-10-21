@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from dataclasses import replace
 import time
 from datetime import datetime
 from pathlib import Path
@@ -405,7 +406,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     from atlas.live.runner import LiveRunner
     from atlas.ops.ledger import BetLedger, LedgerConfig
     from atlas.ops.notify import Notifier
-    from atlas.ops.posture import propose_posture
+    from atlas.ops.posture import DEFAULT_POSTURE, posture_for_mode, propose_posture
 
     adapter = WebBridgeAdapter(session=args.session)
     capture = LiveCapture(
@@ -421,7 +422,19 @@ def cmd_run(args: argparse.Namespace) -> int:
         webhook_url=args.webhook,
         console=True,
     )
-    posture = propose_posture(args.instruction, use_llm=args.llm) if args.instruction else None
+    # A posture is always built, so the run-level overrides (min_ev,
+    # min_stake) apply whether or not an instruction was given.
+    posture = (
+        propose_posture(args.instruction, use_llm=args.llm)
+        if args.instruction
+        else posture_for_mode(DEFAULT_POSTURE)
+    )
+    if args.min_ev is not None:
+        posture = replace(posture, min_ev=args.min_ev)
+    if args.min_stake is not None:
+        posture = replace(posture, min_stake_ngn=args.min_stake)
+    if args.max_stake is not None:
+        posture = replace(posture, max_stake_per_bet=args.max_stake)
     betslip = BetslipDriver(adapter, allow_submit=args.submit)
     # The cashout driver is only armed with --submit: a cashout moves money
     # exactly like a bet does.
@@ -866,6 +879,27 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--webhook", default=None, help="Optional notification webhook")
     run.add_argument(
         "--state", default="data/ops/state.json", help="Persisted posture path"
+    )
+    run.add_argument(
+        "--min-ev",
+        type=float,
+        default=None,
+        help="Override the EV floor for this run. 0.0 forces a placement "
+             "MECHANICS TEST with no edge requirement — use only to verify "
+             "the submission path, never in normal operation.",
+    )
+    run.add_argument(
+        "--max-stake",
+        type=float,
+        default=None,
+        help="Maximum stake per bet in NGN (default: the posture's cap)",
+    )
+    run.add_argument(
+        "--min-stake",
+        type=float,
+        default=None,
+        help="Minimum stake in NGN. SportyBet NG's floor is 10; the "
+             "portfolio default is 100.",
     )
     run.add_argument(
         "--bankroll",

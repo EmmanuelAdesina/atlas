@@ -169,7 +169,7 @@ def test_empty_stats_leave_the_state_alone():
 def test_recovery_navigates_to_a_light_page():
     """A wedged extension is recovered by loading a light page."""
     adapter = FakeAdapter()
-    LiveCapture(adapter).recover()
+    LiveCapture(adapter, pause_scale=0.0).recover()
     assert adapter.navigations, "recovery must navigate somewhere"
 
 
@@ -184,7 +184,7 @@ def test_a_broken_adapter_yields_no_candidates():
         def navigate(self, url, **kwargs):
             raise RuntimeError("extension down")
 
-    capture = LiveCapture(Broken())
+    capture = LiveCapture(Broken(), pause_scale=0.0)
     assert capture.board_candidates() == []
     assert capture.read_scoreboard() == {}
     assert capture.read_stats() == {}
@@ -215,7 +215,9 @@ def test_an_empty_board_triggers_a_reload():
             calls["navigate"] += 1
             return {"success": True}
 
-    capture = LiveCapture(EmptyAdapter(), min_markets=5, max_wait_s=1.0, poll_s=0.1)
+    capture = LiveCapture(
+        EmptyAdapter(), min_markets=5, max_wait_s=1.0, poll_s=0.1, pause_scale=0.0
+    )
     result = capture.capture()
     assert result.ready is False
     assert "empty" in result.reason or "not ready" in result.reason
@@ -234,7 +236,7 @@ def test_the_capture_never_raises_on_a_broken_page():
         def navigate(self, url, **kwargs):
             raise RuntimeError("extension down")
 
-    capture = LiveCapture(Broken(), max_wait_s=0.5, poll_s=0.1)
+    capture = LiveCapture(Broken(), max_wait_s=0.5, poll_s=0.1, pause_scale=0.0)
     result = capture.capture()
     assert result.ready is False
     assert result.reason

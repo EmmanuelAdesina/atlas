@@ -162,6 +162,7 @@ class LiveRunner:
                 max_exposure_per_match=float(raw.get("max_exposure_per_match", 3000.0)),
                 max_bets_per_snapshot=int(raw.get("max_bets_per_snapshot", 2)),
                 max_stake_per_bet=float(raw.get("max_stake_per_bet", 1000.0)),
+                min_stake_ngn=float(raw.get("min_stake_ngn", 100.0)),
                 cashout_min_discount=float(raw.get("cashout_min_discount", 0.0)),
                 require_guaranteed_profit=bool(raw.get("require_guaranteed_profit", False)),
                 rationale=str(raw.get("rationale", "restored")),
@@ -313,13 +314,39 @@ class LiveRunner:
             # Re-check the stop before EVERY bet, not just once per cycle.
             if self.ledger.is_daily_stop_active():
                 break
+            label = d.opportunity.market_label
             try:
-                self.betslip.add_odds(d.opportunity.odds)
+                # A leftover selection would silently turn this bet into a
+                # multiple, so the slip starts empty, every time.
+                if not self.betslip.slip_is_empty():
+                    self.betslip.clear()
+                if not self.betslip.slip_is_empty():
+                    self.last_error = "the betslip would not clear"
+                    if self.notifier is not None:
+                        self.notifier.warn(
+                            "Betslip would not clear — bet skipped",
+                            f"{label} / {d.opportunity.selection}",
+                            cycle=cycle,
+                        )
+                    continue
+                # Find the selection by NAME: the price may have moved since
+                # it was priced, and that must be caught, not clicked.
+                added = {}
+                if label:
+                    added = self.betslip.add_selection(label, d.opportunity.selection)
+                if not added or not added.get("ok"):
+                    added = self.betslip.add_odds(d.opportunity.odds)
+                if not added or not added.get("ok"):
+                    self.last_error = f"selection not on the board: {label} {d.opportunity.selection}"
+                    if self.notifier is not None:
+                        self.notifier.warn(
+                            "Selection not on the board — bet skipped",
+                            f"{label} / {d.opportunity.selection}",
+                            cycle=cycle,
+                        )
+                    continue
                 self.betslip.set_stake(d.stake_ngn)
                 slip = self.betslip.read_slip()
-                if not slip.can_place_bet:
-                    self.betslip.clear()
-                    continue
                 accepted = slip.accepted_odds
                 if accepted is None:
                     # The slip did not report a price, so it cannot be
@@ -328,10 +355,15 @@ class LiveRunner:
                     if self.notifier is not None:
                         self.notifier.warn(
                             "Slip odds unreadable — bet refused",
-                            f"{d.opportunity.market_key} {d.opportunity.selection}",
+                            f"{label} {d.opportunity.selection}",
                             cycle=cycle,
                         )
                     continue
+                # The drift check comes BEFORE the placeable check: when the
+                # price moved, the book shows 'Accept Changes' instead of
+                # 'Place Bet', and the slip is not placeable until the new
+                # price is acknowledged. Refusing on drift is correct, and
+                # the slip must be cleared either way.
                 drift = abs(accepted - d.opportunity.odds) / d.opportunity.odds
                 if drift > PRICE_MISMATCH_TOLERANCE:
                     self.betslip.clear()
@@ -345,12 +377,29 @@ class LiveRunner:
                             selection=d.opportunity.selection,
                         )
                     continue
+                if slip.needs_accept:
+                    # The book moved the price and wants the new one
+                    # acknowledged. The drift is inside the tolerance, so
+                    # accept it and let the slip settle.
+                    self.betslip.accept_changes()
+                    slip = self.betslip.read_slip()
+                if not slip.can_place_bet:
+                    self.betslip.clear()
+                    self.last_error = "the slip is not placeable (the book refused it)"
+                    if self.notifier is not None:
+                        self.notifier.warn(
+                            "Slip not placeable — bet skipped",
+                            f"{label} / {d.opportunity.selection}",
+                            cycle=cycle,
+                        )
+                    continue
                 self.betslip.place_bet()
                 placed += 1
                 self.ledger.record_pending(
                     {
                         "match_id": state.match_id,
                         "market_key": d.opportunity.market_key,
+                        "market_label": label,
                         "selection": d.opportunity.selection,
                         "odds": accepted,
                         "priced_odds": d.opportunity.odds,

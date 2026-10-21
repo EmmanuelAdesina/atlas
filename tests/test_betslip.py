@@ -62,9 +62,9 @@ def test_place_bet_never_runs_when_slip_not_placeable():
     driver = BetslipDriver(adapter, allow_submit=True)
     with pytest.raises(BetslipError):
         driver.place_bet()
-    # Only the read was evaluated: no click payload was ever sent.
-    assert len(adapter.codes) == 1
-    assert "btn.click()" not in adapter.codes[0]
+    # The slip was read, but the Place Bet button was never clicked.
+    assert adapter.codes, "the slip must have been read"
+    assert all("data-atlas-place-bet" not in c for c in adapter.codes)
 
 
 def test_set_stake_refuses_below_minimum():
