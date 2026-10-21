@@ -188,3 +188,53 @@ def test_a_broken_adapter_yields_no_candidates():
     assert capture.board_candidates() == []
     assert capture.read_scoreboard() == {}
     assert capture.read_stats() == {}
+
+
+def test_an_empty_board_triggers_a_reload():
+    """A board that renders but carries no markets is the live feed failing.
+
+    The capture must reload rather than spin, and it must say so.
+    """
+    calls = {"snapshot": 0, "navigate": 0}
+
+    class EmptyAdapter:
+        def evaluate(self, code):
+            if "m-result-title" in code:
+                return {"data": {"value": "{}"}}
+            if "m-table__wrapper" in code:
+                return {"data": {"value": "[]"}}
+            if "vs" in code and "querySelectorAll" in code:
+                return {"data": {"value": ""}}
+            return {"data": {"value": "{}"}}
+
+        def snapshot(self):
+            calls["snapshot"] += 1
+            return {"tree": []}
+
+        def navigate(self, url, **kwargs):
+            calls["navigate"] += 1
+            return {"success": True}
+
+    capture = LiveCapture(EmptyAdapter(), min_markets=5, max_wait_s=1.0, poll_s=0.1)
+    result = capture.capture()
+    assert result.ready is False
+    assert "empty" in result.reason or "not ready" in result.reason
+
+
+def test_the_capture_never_raises_on_a_broken_page():
+    """A capture failure must be a reason, not an exception."""
+
+    class Broken:
+        def evaluate(self, code):
+            raise RuntimeError("extension down")
+
+        def snapshot(self):
+            raise RuntimeError("extension down")
+
+        def navigate(self, url, **kwargs):
+            raise RuntimeError("extension down")
+
+    capture = LiveCapture(Broken(), max_wait_s=0.5, poll_s=0.1)
+    result = capture.capture()
+    assert result.ready is False
+    assert result.reason

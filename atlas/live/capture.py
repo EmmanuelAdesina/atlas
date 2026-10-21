@@ -198,12 +198,25 @@ class LiveCapture:
     (() => {
       const href = location.href || '';
       const text = document.body.innerText || '';
-      const loginForm = !!document.querySelector('input[type=password]');
-      const onLogin = /\/login|\/signin/i.test(href);
-      const expired = /session (?:has )?expired|please log ?in|signed out/i.test(text);
+      const visible = (e) => e && e.offsetParent !== null &&
+        getComputedStyle(e).display !== 'none' &&
+        getComputedStyle(e).visibility !== 'hidden';
+      // The login form stays in the DOM after a successful login, so only a
+      // VISIBLE password field means the session has gone.
+      const visiblePassword = Array.from(
+        document.querySelectorAll('input[type=password]')).some(visible);
+      const onLoginPage = /\/login|\/signin/i.test(href);
+      const hasAccount = /My Account|Bet History/i.test(text);
+      const depositPrompt = /Make a Deposit|Instant Registration/i.test(text);
+      // Expired when the page asks to log in and there is no account header.
+      const expired = visiblePassword || onLoginPage ||
+        (depositPrompt && !hasAccount);
       return JSON.stringify({
-        expired: loginForm || onLogin || expired,
-        href: href, hasPasswordField: loginForm, onLoginPage: onLogin
+        expired: expired,
+        visiblePassword: visiblePassword,
+        onLoginPage: onLoginPage,
+        hasAccount: hasAccount,
+        href: href
       });
     })()
     """
@@ -448,25 +461,35 @@ class LiveCapture:
         """Recover a wedged browser tab.
 
         The extension intermittently stops answering on the heavy live page
-        (the daemon returns 502). Navigating to a light page re-registers the
-        tab and the extension starts answering again, so the loop can
-        recover without human help.
+        (the daemon returns 502). Navigating to a light page re-registers
+        the tab, and the extension starts answering again — but only after a
+        moment, so the follow-up is retried rather than assumed.
         """
+        navigated = False
         try:
             self.adapter.navigate(LIGHT_URL)
+            navigated = True
         except Exception:
             pass
-        time.sleep(2.5)
+        if navigated:
+            time.sleep(2.5)
+            # The tab re-registers asynchronously; wait for it to answer.
+            for _ in range(6):
+                try:
+                    self._evaluate("1")
+                    break
+                except CaptureError:
+                    time.sleep(1.5)
         try:
             self._evaluate(f"location.href={json.dumps(self.url)}; 1")
         except CaptureError:
             pass
-        time.sleep(3.0)
+        time.sleep(4.0)
         try:
             self._evaluate("location.reload(); 1")
         except CaptureError:
             pass
-        time.sleep(2.0)
+        time.sleep(3.0)
         self._loaded = True
         return True
 
@@ -554,6 +577,7 @@ class LiveCapture:
         reason = "not captured"
         media_hidden = False
         recovered = False
+        empty_reads = 0
         # The board must be loaded before anything is read, and the live URL
         # is never passed to navigate().
         if not self.board_loaded():
@@ -587,6 +611,25 @@ class LiveCapture:
                     time.sleep(self.poll_s)
                     continue
                 markets = extract_markets(texts, self.match_id)
+                if not markets:
+                    # The board rendered but carries no markets: the live feed
+                    # is not delivering. A reload is the only thing that
+                    # fixes it, so do it after a couple of empty reads.
+                    empty_reads += 1
+                    if empty_reads >= 2 and not recovered:
+                        recovered = True
+                        self.recover()
+                    time.sleep(self.poll_s)
+                    if time.monotonic() >= deadline:
+                        return CaptureResult(
+                            False,
+                            "the board is empty (the live feed is not delivering)",
+                            markets=markets,
+                            observed_at=datetime.now(timezone.utc),
+                            match_id=self.match_id,
+                        )
+                    continue
+            empty_reads = 0
             state = extract_live_match_state(texts, self.match_id) if texts else None
             if state is None:
                 state = self._state_from_dom()
