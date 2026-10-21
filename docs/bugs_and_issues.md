@@ -87,6 +87,27 @@ Established by driving the real board; every one of them is load-bearing.
 | 11 | A finished match shows 'ENDED' / 'Match Ended' instead of a scoreboard | The capture detects it and the period becomes `ft`, so the runner settles. |
 | 12 | The board's live feed periodically delivers nothing | The readiness gate refuses to plan on an incomplete board. |
 
+### The real placement flow (found by driving the book until a bet landed)
+
+Five things had to be right, and every one of them failed silently first.
+This is the part to read before the first live run.
+
+| # | Behaviour | Consequence |
+|---|-----------|-------------|
+| 1 | The betslip can be left in **SIM mode** | A simulation slip is rejected by the order API with a bare "Something went wrong..." and the balance never moves. The driver now switches to REAL mode before placing and verifies it. |
+| 2 | A bet is taken in **two steps**: 'Place Bet' opens an 'About to pay \| NGN 10.00 \| Cancel \| **Confirm**' dialog | Clicking 'Place Bet' alone places nothing. The confirmation is clicked too. |
+| 3 | A synthetic `element.click()` from injected script is **untrusted** | The order was never submitted even though the click "succeeded". Every action goes through the extension's own click action on a uniquely-marked element — a real browser click. |
+| 4 | When the price moves the book shows '**Accept Changes**' instead of 'Place Bet' | The slip is not placeable until the new price is acknowledged. That acknowledgement happens only AFTER the caller has checked the new price against the priced odds. |
+| 5 | The reliable way to empty the slip is its '**Remove All**' control (per-selection remove buttons are the fallback) | A leftover selection silently turns the next bet into a multiple. The runner refuses to place unless the slip is empty first. |
+
+Two more timing facts: the book enables the submit button a moment after the
+stake is set (reading it too early concludes the slip is not placeable), and
+the order API (`POST /api/ng/orders/order`) returns 200 even when the bet is
+refused — so the result must be verified from the slip, not the status code.
+
+The odds-drift guard was verified twice against the live book: an 18% and a
+32% move were both refused.
+
 ### Live-board coverage: what is still unpriced (after the path engine)
 
 Measured against the captured real board (92 headers, 2,794 odds, one match).
