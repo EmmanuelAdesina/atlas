@@ -76,6 +76,17 @@ BALANCE_PROBE_DELAY_S = 30.0
 # probe gives up loudly instead of staying armed forever.
 BALANCE_PROBE_MAX_WAIT_S = 300.0
 
+# Liveness pulse: a daemon thread refreshes the heartbeat every interval
+# even while a cycle is mid-flight, so the panel's STALE verdict finally
+# means 'the process is not writing anything' — true death, not a slow
+# cycle (2026-10-31: cycles stretched past 5 minutes on wedged reads).
+PULSE_INTERVAL_S = 15.0
+PULSE_QUIET_S = 10.0  # do not stomp a heartbeat younger than this
+# The pulse's one blind spot: a main thread that wedges WITHOUT a timeout
+# would pulse forever. The watchdog restarts on any single stage older
+# than this — generous, since every daemon call is already bounded at 45s.
+STAGE_STUCK_AFTER_S = 600.0
+
 # Degenerate-certainty thresholds. A model probability this close to 0 or 1
 # is only credible when the book has also stopped pricing the outcome
 # (odds ~1.00). At a live price above 1.05 the two are contradicting each
@@ -206,6 +217,16 @@ class LiveRunner:
         # armed through later, legitimate placements.
         self._probe_at: Optional[float] = None
         self._probe_baseline: Optional[float] = None
+        # Liveness pulse state (see PULSE_INTERVAL_S). The heartbeat file has
+        # two writers now — the main thread at cycle end, the pulse thread
+        # between them — so every write is serialised by _hb_lock.
+        self._hb_lock = threading.RLock()
+        self._hb_last_write = 0.0
+        self._stage_name: Optional[str] = None
+        self._stage_started = 0.0
+        self._cycle_open = False
+        self._pulse_stop = threading.Event()
+        self._pulse_thread: Optional[threading.Thread] = None
         # --- page ownership ------------------------------------------------
         # ONE re-entrant lock for every PAGE MUTATION: the cycle's board
         # switches/recovery and the placement worker's betslip flow must
@@ -1631,6 +1652,14 @@ class LiveRunner:
         """
         self.load_state()
         n = 0
+        # The pulse thread owns liveness from here on: even a cycle wedged
+        # into minutes of bounded-but-slow reads keeps the heartbeat fresh.
+        self._stage_set("starting")
+        self._pulse_stop.clear()
+        self._pulse_thread = threading.Thread(
+            target=self._pulse_loop, name="atlas-pulse", daemon=True
+        )
+        self._pulse_thread.start()
         try:
             while max_cycles is None or n < max_cycles:
                 # Re-read the persisted posture each cycle: the dashboard
@@ -1645,7 +1674,9 @@ class LiveRunner:
                 # (2026-10-31). The ping says 'scanning' with the cycle
                 # number, and the real report overwrites it at cycle end.
                 self._heartbeat_scan_ping()
+                self._cycle_open = True
                 try:
+                    self._stage_set(f"cycle {self.cycle + 1}: capture")
                     report = self.run_cycle()
                 except Exception as e:  # noqa: BLE001
                     self.last_error = f"cycle {self.cycle} crashed: {e!r}"
@@ -1666,6 +1697,8 @@ class LiveRunner:
                         except Exception:
                             pass
                 self._write_heartbeat(report)
+                self._cycle_open = False
+                self._stage_set("idle (between cycles)")
                 n += 1
                 if max_cycles is None:
                     time.sleep(self.cycle_s)
@@ -1673,6 +1706,7 @@ class LiveRunner:
             # Never abandon a queued bet on Ctrl-C: a submitted ticket the
             # ledger never records is a phantom position with real money
             # on it.
+            self._pulse_stop.set()
             self.drain(timeout=30.0)
         return self.reports
 
@@ -1701,7 +1735,9 @@ class LiveRunner:
         if not self.state_path:
             return
         path = self.state_path.parent / "heartbeat.json"
+        self._hb_lock.acquire()
         try:
+            self._hb_last_write = time.monotonic()
             status = self.placement_status()
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -1748,6 +1784,15 @@ class LiveRunner:
                         # The post-unconfirmed balance probe: 'pending'
                         # means a receipt-missed bet is still un-resolved.
                         "balance_probe": "pending" if self._probe_at else None,
+                        # What the main thread is doing RIGHT NOW and for how
+                        # long — the watchdog's wedged-stage signal and the
+                        # operator's answer to 'what is it doing'.
+                        "stage": self._stage_name,
+                        "stage_age_s": (
+                            round(time.monotonic() - self._stage_started, 1)
+                            if self._stage_name is not None
+                            else None
+                        ),
                         # Placement worker progress: the cycle no longer
                         # blocks on placement, so 'placed' in the report
                         # can lag real completions. The worker counters are
@@ -1765,6 +1810,48 @@ class LiveRunner:
                 )
         except (OSError, TypeError):
             pass
+        finally:
+            self._hb_lock.release()
+
+    def _stage_set(self, name: str) -> None:
+        """Announce what the main thread is doing (heartbeat's stage field)."""
+        self._stage_name = name
+        self._stage_started = time.monotonic()
+
+    def _pulse_once(self) -> bool:
+        """One pulse write if the heartbeat has gone quiet. True if written.
+
+        Mid-cycle the pulse reports the live stage; between cycles it
+        re-publishes the last cycle's report with a fresh timestamp so the
+        panel's ready/reason rows stay stable while the age stays low.
+        """
+        with self._hb_lock:
+            if time.monotonic() - self._hb_last_write < PULSE_QUIET_S:
+                return False
+        if self._cycle_open:
+            age = time.monotonic() - self._stage_started
+            report = CycleReport(
+                cycle=self.cycle,
+                at=datetime.now(timezone.utc).isoformat(),
+                ready=False,
+                reason=f"working (stage {self._stage_name} for {age:.0f}s)",
+            )
+        else:
+            last = self.reports[-1] if self.reports else None
+            if last is None:
+                self._heartbeat_scan_ping()
+                return True
+            report = replace(last, at=datetime.now(timezone.utc).isoformat())
+        self._write_heartbeat(report)
+        return True
+
+    def _pulse_loop(self) -> None:
+        """Background liveness writer: dies with the process (daemon=True)."""
+        while not self._pulse_stop.wait(PULSE_INTERVAL_S):
+            try:
+                self._pulse_once()
+            except Exception:
+                pass
 
     # --- cashout ---------------------------------------------------------
 

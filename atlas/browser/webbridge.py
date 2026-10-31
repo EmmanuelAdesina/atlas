@@ -16,13 +16,21 @@ estimation and strategy live in atlas.live.* and never import this module.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import httpx
 
-DEFAULT_DAEMON_URL = "http://127.0.0.1:10086/command"
+# The daemon is normally local (127.0.0.1:10086). A split-plane deployment
+# (brain on an always-on box, eyes in a browser elsewhere — e.g. over a
+# Tailscale mesh) points ATLAS_WEBBRIDGE_DAEMON_URL at the remote daemon;
+# wide-target like the split-brain deployment.
+DAEMON_URL_ENV = "ATLAS_WEBBRIDGE_DAEMON_URL"
+DEFAULT_DAEMON_URL = os.environ.get(
+    DAEMON_URL_ENV, "http://127.0.0.1:10086/command"
+)
 
 # Transient daemon answers. The extension wedges on the heavy live pages and
 # the daemon then answers 502/503/504; httpx.TransportError appears while the

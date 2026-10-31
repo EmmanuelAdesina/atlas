@@ -398,12 +398,15 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     extension) and writes the operator notifications. It has no money tool:
     it can never place a bet.
     """
-    from atlas.browser.webbridge import WebBridgeAdapter
+    from atlas.browser.webbridge import DEFAULT_DAEMON_URL, WebBridgeAdapter
     from atlas.live.capture import LiveCapture
     from atlas.live.supervisor import LLMClient, Supervisor
     from atlas.ops.notify import Notifier
 
-    adapter = WebBridgeAdapter(session=args.session)
+    adapter = WebBridgeAdapter(
+        session=args.session,
+        daemon_url=args.daemon_url or DEFAULT_DAEMON_URL,
+    )
     capture = LiveCapture(adapter, min_markets=args.min_markets, max_wait_s=45)
     notifier = Notifier(log_path=args.notifications, console=True)
     client = LLMClient()
@@ -449,7 +452,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     """
     from atlas.browser.betslip import BetslipDriver
     from atlas.browser.cashout import CashoutDriver
-    from atlas.browser.webbridge import WebBridgeAdapter
+    from atlas.browser.webbridge import DEFAULT_DAEMON_URL, WebBridgeAdapter
     from atlas.live.decisions import PolicyConfig
     from atlas.live.supervisor import LLMClient, Supervisor
     from atlas.live.capture import LiveCapture
@@ -458,7 +461,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     from atlas.ops.notify import Notifier
     from atlas.ops.posture import DEFAULT_POSTURE, posture_for_mode, propose_posture
 
-    adapter = WebBridgeAdapter(session=args.session)
+    adapter = WebBridgeAdapter(
+        session=args.session,
+        daemon_url=args.daemon_url or DEFAULT_DAEMON_URL,
+    )
     capture = LiveCapture(
         adapter,
         min_markets=args.min_markets,
@@ -919,6 +925,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sup.add_argument("--task", default=None, help="What the supervisor should do")
     sup.add_argument("--session", default="atlas-live", help="WebBridge session")
+    sup.add_argument(
+        "--daemon-url",
+        default=None,
+        help=(
+            "WebBridge daemon URL (or ATLAS_WEBBRIDGE_DAEMON_URL). "
+            "Default: the loop on an always-on box drives a remote browser "
+            "daemon over the mesh"
+        ),
+    )
     sup.add_argument("--min-markets", type=int, default=10, help="Markets for a ready panel")
     sup.add_argument(
         "--no-llm",
@@ -942,6 +957,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the autonomous live loop (capture -> price -> plan -> place -> settle)",
     )
     run.add_argument("--session", default="atlas-live", help="WebBridge session")
+    run.add_argument(
+        "--daemon-url",
+        default=None,
+        help=(
+            "WebBridge daemon URL (or ATLAS_WEBBRIDGE_DAEMON_URL). "
+            "Default: the loop on an always-on box drives a remote browser "
+            "daemon over the mesh"
+        ),
+    )
     run.add_argument("--ledger", default="data/ops/ledger.jsonl", help="Ledger JSONL path")
     run.add_argument(
         "--daily-loss-limit", type=float, default=-500.0, help="Hard daily stop (NGN)"
