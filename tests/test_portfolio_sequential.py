@@ -112,6 +112,67 @@ def test_stake_below_min_is_skipped():
     assert "below min" in d.reason
 
 
+# --- flat sizing mode (operator decision 2026-10-28) -----------------------
+# When min == max (NGN 10 both), the stake is the operator's flat stake
+# whenever the conservative Kelly edge is positive. Proportional Kelly on a
+# ~50 NGN balance computes 1-4 NGN stakes that refuted 1,133
+# recommendations in one afternoon while the operator explicitly set NGN 10
+# as floor AND cap: min == max IS the flat regime.
+
+def test_flat_mode_bets_the_floor_when_kelly_positive():
+    from atlas.live.decisions import Estimate, PolicyConfig, compute_recommended_stake_ngn
+
+    est = Estimate(p=0.88, confidence="high", model_name="t", p_lower=0.80)
+    policy = PolicyConfig(
+        min_stake_ngn=10.0, max_stake_per_bet=10.0, bankroll_ngn=52.68,
+        kelly_fraction=0.10, max_exposure_per_match=3000.0,
+    )
+    # raw Kelly on a 52.68 bankroll: f* = 0.032 -> ~1 NGN, which the floor
+    # would refuse; flat mode returns the operator's full NGN 10 instead.
+    stake = compute_recommended_stake_ngn(est, 1.42, policy)
+    assert stake == 10.0
+
+
+def test_flat_mode_still_refuses_zero_kelly_edge():
+    from atlas.live.decisions import Estimate, PolicyConfig, compute_recommended_stake_ngn
+
+    est = Estimate(p=0.68, confidence="high", model_name="t", p_lower=0.62)
+    policy = PolicyConfig(
+        min_stake_ngn=10.0, max_stake_per_bet=10.0, bankroll_ngn=52.68,
+        kelly_fraction=0.10, max_exposure_per_match=3000.0,
+    )
+    # p_lower 0.62 at 1.42 < breakeven 0.704: the conservative edge is
+    # NEGATIVE — flat mode does not rescue a no-edge selection.
+    assert compute_recommended_stake_ngn(est, 1.42, policy) == 0.0
+
+
+def test_flat_mode_respects_remaining_match_exposure():
+    from atlas.live.decisions import Estimate, PolicyConfig, compute_recommended_stake_ngn
+
+    est = Estimate(p=0.88, confidence="high", model_name="t", p_lower=0.80)
+    policy = PolicyConfig(
+        min_stake_ngn=10.0, max_stake_per_bet=10.0, bankroll_ngn=52.68,
+        kelly_fraction=0.10, max_exposure_per_match=3000.0,
+    )
+    # 2995 staked already: remaining 5 NGN < floor -> no bet (never a 5
+    # NGN bet below the book's NGN 10 floor).
+    assert compute_recommended_stake_ngn(est, 1.42, policy, 2995.0) == 0.0
+
+
+def test_proportional_mode_when_max_above_min():
+    from atlas.live.decisions import Estimate, PolicyConfig, compute_recommended_stake_ngn
+
+    est = Estimate(p=0.80, confidence="high", model_name="t", p_lower=0.62)
+    policy = PolicyConfig(
+        min_stake_ngn=10.0, max_stake_per_bet=1000.0, bankroll_ngn=10_000.0,
+        kelly_fraction=0.10, max_exposure_per_match=3000.0,
+    )
+    # max > min: proportional Kelly returns (large, floored to Naira) and
+    # the min==max flat branch must NOT fire.
+    stake = compute_recommended_stake_ngn(est, 2.0, policy)
+    assert stake > 10.0
+
+
 def test_factor_cap_blocks_13th_bet_without_high_conservative_ev():
     # 13th bet in the SAME family as the 12 stacked bets (total_goals).
     opp = make_opp(market_key="ou_3_5", selection="over", odds=2.0, model_p=0.6, p_lower=0.555)

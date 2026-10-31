@@ -1219,15 +1219,21 @@ def price_from_joint_matrix(
         opp_base = cur_a if is_home else cur_h
         own_pmf = marg.home_pmf if is_home else marg.away_pmf
         own_base = cur_h if is_home else cur_a
-        sign = 1 if is_home else -1
         # Win AND the opponent scores nothing: opponent stays on 0 and the
         # side's own final total is strictly ahead.
+        #
+        # The comparison is between the FINAL scores, and it is the same
+        # expression for both sides: (own_base + sk) > (opp_base + ok).
+        # A `sign` factor used to invert it for the away side, so
+        # away_win_to_nil 'Yes' was always 0.0 and 'No' always 1.0 — a
+        # manufactured ~24% edge on every away-win-to-nil price, taken for
+        # real money at 0-0 (2026-10-29).
         p_win = 0.0
         for ok, opp_cell in enumerate(opp_pmf):
             if opp_base + ok != 0:
                 continue
             for sk, own_cell in enumerate(own_pmf):
-                if sign * ((own_base + sk) - opp_base) > 0:
+                if (own_base + sk) > (opp_base + ok):
                     p_win += opp_cell * own_cell
         want_yes = sel.strip().lower() in ("yes", "1")
         if not want_yes and sel.strip().lower() not in ("no", "2"):

@@ -45,6 +45,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from atlas.browser.slipclear import JS_MARK_SLIP_REMOVE, SWEEP_MAX_CLICKS
+from atlas.live.capture import CaptureError
+
 MIN_STAKE_NGN = 10.0
 DEFAULT_STAKE_NGN = 100.0
 
@@ -80,7 +83,25 @@ class SlipState:
     # The book shows 'Accept Changes' when the price moved and the slip
     # needs the new price acknowledged before it can be placed.
     needs_accept: bool = False
+    # True when the slip's own text says a selection is Unavailable (the
+    # book suspended the market under the card). The card can only be
+    # cleared through REAL clicks, so waiting for Place Bet is pointless.
+    unavailable: bool = False
+    # True when the slip is the book's SIM (simulation) slip: its bets are
+    # virtual and never touch the account, so money must never move on it.
+    is_sim: bool = False
+    # True when the page is showing the LOGIN form: the session expired and
+    # every betslip control is a login control in disguise.
+    session_expired: bool = False
     raw_text: str = ""
+    # True when a 'Place Bet'-named button EXISTS (any state). False
+    # together with can_place_bet=False means the selection never landed;
+    # True with can_place_bet=False means the book has the button but will
+    # not enable it (validating, or the market is suspended).
+    has_place_button: bool = False
+    # Button inventory at read time (text/disabled/visible), so a
+    # not-placeable failure is explainable instead of a bare refusal.
+    diagnostic: dict = field(default_factory=dict)
 
     @property
     def accepted_odds(self) -> Optional[float]:
@@ -157,7 +178,49 @@ def validate_stake(stake_ngn: float, balance_ngn: Optional[float] = None) -> str
 
 # --- JS payloads (kept as constants so they are reviewable in one place) ---
 
-JS_ADD_ODDS = """
+# A VISIBLE password field means the session is gone and the book is showing
+# its login modal. Every mutating payload refuses in that state: the login
+# form is built from the same components as the betslip, so an unscoped
+# selector reached it and typed a stake into the PHONE field ('+234 10.00',
+# 2026-10-30) while the placement worker drained a queue left over from
+# before the logout.
+_LOGIN_DETECT = r"""
+  const __loginVisible = (() => {
+    const vis = (e) => {
+      if (!e) return false;
+      const r = e.getBoundingClientRect();
+      if (!r || r.width <= 0 || r.height <= 0) return false;
+      const cs = window.getComputedStyle(e);
+      return cs.visibility !== 'hidden' && cs.display !== 'none';
+    };
+    return Array.from(
+      document.querySelectorAll('input[type=password]')).some(vis);
+  })();
+"""
+
+_LOGIN_GUARD = _LOGIN_DETECT + r"""
+  if (__loginVisible) {
+    return JSON.stringify({
+      ok: false,
+      login: true,
+      error: 'session expired (the login form is showing)'
+    });
+  }
+"""
+
+
+def _guarded(js: str) -> str:
+    """Insert the login guard at the top of an IIFE payload."""
+    return js.replace("(() => {", "(() => {" + _LOGIN_GUARD, 1)
+
+
+def _detected(js: str) -> str:
+    """Insert the login DETECTION (no early return) into an IIFE payload."""
+    return js.replace("(() => {", "(() => {" + _LOGIN_DETECT, 1)
+
+
+
+JS_ADD_ODDS = _guarded("""
 (() => {
   const rows = Array.from(document.querySelectorAll('%(row)s'));
   for (const row of rows) {
@@ -172,11 +235,36 @@ JS_ADD_ODDS = """
   return JSON.stringify({ok: false, error: 'odds cell not found'});
 })()
 """
-
-JS_SET_STAKE = """
+)
+JS_SET_STAKE = _guarded("""
 (() => {
-  const el = document.querySelector('%(input)s');
-  if (!el) return JSON.stringify({ok: false, error: 'stake input not found'});
+  // The stake box is the ONLY editable number in the slip. Scoping by class
+  // alone matched the login modal's phone field (both carry .m-input), so
+  // the input must also be a visible, non-tel/password field that advertises
+  // itself as the stake ('min. 10') or sits in the slip's own panel.
+  const inputs = Array.from(document.querySelectorAll('%(input)s'));
+  const usable = (i) => {
+    const type = (i.type || 'text').toLowerCase();
+    if (type === 'password' || type === 'tel' || type === 'email') return false;
+    if (i.disabled || i.readOnly) return false;
+    const r = i.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  };
+  let el = inputs.filter(usable).find(
+    (i) => /min|stake/i.test(i.placeholder || '')
+  );
+  if (!el) {
+    const panel = Array.from(document.querySelectorAll('div,section'))
+      .find((d) => /Total\\s*Stake/i.test(d.innerText || '')
+        && (d.innerText || '').length < 900);
+    el = panel ? Array.from(panel.querySelectorAll('input')).find(usable) : null;
+  }
+  if (!el) {
+    return JSON.stringify({
+      ok: false,
+      error: 'stake input not found (no betslip on this page)'
+    });
+  }
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
   setter.call(el, '%(stake)s');
   el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -184,9 +272,9 @@ JS_SET_STAKE = """
   el.dispatchEvent(new Event('blur', { bubbles: true }));
   return JSON.stringify({ok: true, value: el.value});
 })()
-"""
+""")
 
-JS_READ_SLIP = """
+JS_READ_SLIP = _detected("""
 (() => {
   const t = document.body.innerText || '';
   const lines = t.split('\\n').map(s => s.trim()).filter(Boolean);
@@ -200,17 +288,44 @@ JS_READ_SLIP = """
   // 'Place Bet'; the slip is only placeable once that is acknowledged.
   const accept = Array.from(document.querySelectorAll('button, [role=button]'))
     .filter(b => /accept changes/i.test((b.innerText||'') + ' ' + (b.getAttribute('aria-label')||'')));
+  // A simulation slip (the book's SIMULATE product) has no real Place Bet
+  // to press: its bets never touch the account. It is recognizable by its
+  // own text ('Times of Simulate', 'virtually simulated') or its
+  // sim-styled button. This is a MONEY-path signal, not cosmetic.
+  const placeBtn = document.querySelector('[data-op="desktop-betslip-place-bet-button"]');
+  // Scoped to the SLIP's own segment: the SIMULATE product banner text
+  // ('virtually simulated results') also appears site-wide and must not
+  // flag every bet as virtual money.
+  const segText = seg.join(' ');
+  const sim = /Times of Simulate|virtually simulated/i.test(segText) ||
+    (placeBtn && /af-button--sim-bet/.test(placeBtn.className || ''));
+  // A suspended market under the slip shows 'Unavailable'. Waiting for
+  // Place Bet can never succeed in that state; the caller must clear.
+  const unavailable = /unavailable/i.test(segText);
+  // WHY is the button not usable? A button that exists but is disabled
+  // means the book is still validating (or the market is suspended and
+  // the button stays grey); no button at all means the selection never
+  // landed on the slip. Recorded on every not-placeable failure.
+  const info = place.slice(0, 3).map(b => ({
+    text: String(b.innerText || '').slice(0, 20),
+    dis: !!b.disabled,
+    vis: !!b.offsetParent,
+  }));
   return JSON.stringify({
     seg: seg,
+    login: __loginVisible,
     stake: stakeEl ? stakeEl.value : null,
     canPlace: place.some(b => !b.disabled && visible(b)),
     hasPlaceButton: place.length > 0,
-    needsAccept: accept.length > 0
+    needsAccept: accept.length > 0,
+    unavailable: unavailable,
+    sim: !!sim,
+    placeInfo: info
   });
 })()
 """
-
-JS_CLEAR = """
+)
+JS_CLEAR = _guarded("""
 (() => {
   const visible = (e) => e && e.offsetParent !== null;
   // The slip carries a 'Remove All' control when it holds selections; the
@@ -234,15 +349,42 @@ JS_CLEAR = """
   return JSON.stringify({ok: true, how: 'per-selection', removed: removed});
 })()
 """
-
-JS_SLIP_EMPTY = """
+)
+JS_DISMISS_RECEIPT = _guarded("""
 (() => {
-  const t = document.body.innerText || '';
-  return JSON.stringify({empty: !/Total\\s*Stake/i.test(t)});
+  const visible = (e) => e && e.offsetParent !== null;
+  if (!/Submission Successful/i.test(document.body.innerText || ''))
+    return JSON.stringify({ok: false, error: 'no receipt showing'});
+  // The receipt's own acknowledgement control: 'OK' (and 'Rebet'/'Check Bet
+  // History' next to it — never those). Closing it clears the way for the
+  // next bet's add + identity check.
+  const ok = Array.from(document.querySelectorAll('button, [role=button]'))
+    .find(b => visible(b) && /^(ok|done|close)$/i.test((b.innerText||'').trim()));
+  if (!ok) return JSON.stringify({ok: false, error: 'no receipt OK button'});
+  ok.setAttribute('data-atlas-dismiss-receipt', '1');
+  return JSON.stringify({ok: true, selector: '[data-atlas-dismiss-receipt="1"]'});
 })()
 """
-
-JS_PLACE_BET = """
+)
+JS_SLIP_EMPTY = _detected("""
+(() => {
+  const t = document.body.innerText || '';
+  // 'Submission Successful' is the book's RECEIPT for a placed bet. The slip
+  // does not go empty after a win: it shows the receipt, which still renders
+  // a Total Stake and a Booking Code. Ground truth from the live book
+  // (data/ops/postconfirm_probe.json). A receipt means there are no PENDING
+  // selections, which is what callers actually ask about. The funding
+  // dialog ('Balance Insufficient — not enough balance to place this bet')
+  // is reported separately: it outranks any receipt and means the submission
+  // was refused by the book.
+  const receipt = /Submission Successful/i.test(t);
+  const booking = (t.match(/Booking Code\\s*\\|?\\s*\\n*\\s*([A-Z0-9]{5,10})\\b/) || [])[1] || null;
+  const insufficient = /not enough balance|insufficient balance/i.test(t) && !receipt;
+  return JSON.stringify({empty: !/Total\\s*Stake/i.test(t) || receipt, receipt, booking, insufficient, login: __loginVisible});
+})()
+"""
+)
+JS_PLACE_BET = _guarded("""
 (() => {
   const b = Array.from(document.querySelectorAll('button, [role=button]'))
     .find(x => /place bet/i.test((x.innerText||'') + ' ' + (x.getAttribute('aria-label')||''))
@@ -252,9 +394,9 @@ JS_PLACE_BET = """
   return JSON.stringify({ok: true, selector: '[data-atlas-place-bet="1"]'});
 })()
 """
+)
 
-
-JS_MARK_ACCEPT = """
+JS_MARK_ACCEPT = _guarded("""
 (() => {
   const b = Array.from(document.querySelectorAll('button, [role=button]'))
     .find(x => /accept changes/i.test((x.innerText||'') + ' ' + (x.getAttribute('aria-label')||''))
@@ -264,9 +406,9 @@ JS_MARK_ACCEPT = """
   return JSON.stringify({ok: true, selector: '[data-atlas-accept="1"]'});
 })()
 """
+)
 
-
-JS_MARK_CONFIRM = """
+JS_MARK_CONFIRM = _guarded("""
 (() => {
   const b = Array.from(document.querySelectorAll('button, [role=button]'))
     .find(x => /^confirm$/i.test((x.innerText||'').trim())
@@ -276,7 +418,7 @@ JS_MARK_CONFIRM = """
   return JSON.stringify({ok: true, selector: '[data-atlas-confirm="1"]'});
 })()
 """
-
+)
 
 JS_REAL_MODE = """
 (() => {
@@ -287,17 +429,20 @@ JS_REAL_MODE = """
   // shadow ('show-highlight'); the clickable control is an 'inside-btn'.
   const labels = Array.from(box.querySelectorAll('.shadow-text, .inside-btn'));
   const active = labels.find(l => /show-highlight/.test((l.className||'').toString()));
-  const real = labels.find(l => /^REAL$/i.test((l.textContent||'').trim()));
-  if (!real) return JSON.stringify({ok: false, error: 'no REAL control'});
   const activeText = active ? (active.textContent||'').trim() : '';
   if (activeText.toUpperCase() === 'REAL') return JSON.stringify({ok: true, already: true});
+  const real = labels.find(l => /^REAL$/i.test((l.textContent||'').trim()));
+  if (!real) return JSON.stringify({ok: false, error: 'no REAL control'});
   const btn = real.className.includes('inside-btn') ? real :
     (real.parentElement && real.parentElement.querySelector('.inside-btn'));
   if (!btn || !visible(btn)) return JSON.stringify({ok: false, error: 'REAL control not clickable'});
-  btn.click();
-  return JSON.stringify({ok: true, switchedFrom: activeText});
+  // NO synthetic click here: the book's slider ignores untrusted events.
+  // Mark the control so a REAL browser click (adapter.click) can target it.
+  btn.setAttribute('data-atlas-real-mode', '1');
+  return JSON.stringify({ok: true, selector: '[data-atlas-real-mode="1"]'});
 })()
 """
+
 
 JS_MODE_STATE = """
 (() => {
@@ -343,6 +488,22 @@ class BetslipDriver:
         self.allow_submit = bool(allow_submit)
 
     # --- low level -----------------------------------------------------
+
+    @staticmethod
+    def _poll(predicate, timeout_s: float, interval_s: float = 0.1):
+        """Poll a predicate until truthy or the deadline passes.
+
+        Placement used fixed sleeps (0.3s / 0.5s / 1.0s) at every step. The
+        book normally answers in tens of milliseconds, so those sleeps were
+        pure dead time — several seconds per bet. Polling at 0.1s keeps the
+        same timeout but returns as soon as the page is ready.
+        """
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        result = predicate()
+        while not result and time.monotonic() < deadline:
+            time.sleep(interval_s)
+            result = predicate()
+        return result
 
     def _js(self, template: str, **fmt: Any) -> dict:
         code = template % fmt
@@ -395,7 +556,13 @@ class BetslipDriver:
             not state.can_place_bet
             and time.monotonic() < deadline
         ):
-            time.sleep(0.3)
+            # A wedged slip (Unavailable), a moved price (Accept Changes) or
+            # a simulation slip will never become placeable by waiting.
+            # Returning immediately keeps the cycle moving; the caller
+            # decides to accept or clear.
+            if state.needs_accept or state.unavailable or state.is_sim:
+                break
+            time.sleep(0.1)
             state = self._read_slip_once()
         return state
 
@@ -418,6 +585,13 @@ class BetslipDriver:
             potential_win_ngn=potential,
             can_place_bet=bool(data.get("canPlace")),
             needs_accept=bool(data.get("needsAccept")),
+            unavailable=bool(data.get("unavailable")),
+            is_sim=bool(data.get("sim")),
+            # The page is showing the LOGIN modal: the slip reading is
+            # meaningless and nothing may be typed or clicked.
+            session_expired=bool(data.get("login")),
+            has_place_button=bool(data.get("hasPlaceButton")),
+            diagnostic=data.get("placeInfo") or {},
             raw_text=text,
         )
 
@@ -443,13 +617,14 @@ class BetslipDriver:
         except Exception:
             pass
         # The slip settles into a placeable state.
-        for _ in range(20):
-            time.sleep(0.3)
-            if self.read_slip(wait_s=0.0).can_place_bet:
-                break
+        self._poll(
+            lambda: self.read_slip(wait_s=0.0).can_place_bet,
+            timeout_s=6.0,
+            interval_s=0.1,
+        )
         return {"ok": True}
 
-    JS_ADD_SELECTION = """
+    JS_ADD_SELECTION = _guarded("""
     (() => {
       const market = '%(market)s';
       const selection = '%(selection)s';
@@ -474,7 +649,7 @@ class BetslipDriver:
       return JSON.stringify({ok: false, error: 'selection not found on the board'});
     })()
     """
-
+)
     def add_selection(self, market_label: str, selection: str) -> dict:
         """Add a selection to the slip BY NAME and report the accepted price.
 
@@ -489,7 +664,7 @@ class BetslipDriver:
             selection=str(selection).replace("'", ""),
         )
 
-    JS_ACCEPT_CHANGES = r"""
+    JS_ACCEPT_CHANGES = _guarded(r"""
     (() => {
       const b = Array.from(document.querySelectorAll('button, [role=button]'))
         .find(x => /accept changes/i.test((x.innerText||'') + ' ' + (x.getAttribute('aria-label')||''))
@@ -499,7 +674,7 @@ class BetslipDriver:
       return JSON.stringify({ok: true});
     })()
     """
-
+)
     def _evaluate(self, code: str) -> Any:
         """Evaluate JS and return the unwrapped value."""
         raw = self.adapter.evaluate(code)
@@ -513,50 +688,154 @@ class BetslipDriver:
             return data["value"]
         return data
 
+    def slip_state(self) -> dict:
+        """Slip emptiness + placement receipt, as the live page reports it.
+
+        `empty` is True when the slip holds no PENDING selection. The book's
+        placement receipt ('Submission Successful') also counts as empty for
+        that purpose — it carries a Total Stake, but the bet it belongs to is
+        already live at the book. `insufficient` reports the book's funding
+        dialog when it is showing (no receipt takes precedence).
+        """
+        default = {"empty": False, "receipt": False, "booking": None, "insufficient": False}
+        try:
+            raw = self._evaluate(JS_SLIP_EMPTY)
+        except CaptureError:
+            return default
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return default
+        else:
+            data = raw if isinstance(raw, dict) else {}
+        return {
+            "empty": bool(data.get("empty")),
+            "receipt": bool(data.get("receipt")),
+            "booking": data.get("booking"),
+            "insufficient": bool(data.get("insufficient")),
+        }
+
     def slip_is_empty(self) -> bool:
         """Is the slip free of selections?
 
         A leftover selection silently turns the next bet into a multiple, so
         this is checked before every placement.
         """
-        try:
-            raw = self._evaluate(JS_SLIP_EMPTY)
-        except CaptureError:
-            return False
-        if isinstance(raw, str):
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError:
-                return False
-        else:
-            data = raw if isinstance(raw, dict) else {}
-        return bool(data.get("empty"))
+        return self.slip_state().get("empty", False)
 
     def clear(self) -> dict:
-        """Remove every selection from the slip. Safe: never submits."""
+        """Remove every selection from the slip. Safe: never submits.
+
+        Two-stage: the legacy Remove All/per-selection JS first (it works
+        on builds that honour synthetic clicks), then the REAL-click sweep
+        for the build that ignores them — the Unavailable/'Accept Changes'
+        wedge (2026-10-28, FC Goa) only clears through real removals.
+        The legacy JS_CLEAR result dict (its 'removed' key included) is
+        preserved as the return basis; sweep enrichment is added on top.
+        """
         result = self._js(JS_CLEAR)
-        # The book needs a moment to drop the selections.
-        for _ in range(8):
-            if self.slip_is_empty():
+        if isinstance(result, dict):
+            out = dict(result)
+        elif isinstance(result, str):
+            try:
+                out = dict(json.loads(result))
+            except json.JSONDecodeError:
+                out = {}
+        else:
+            out = {}
+        if out.get("login"):
+            # The page is the login modal: there is no slip to clear, and
+            # 'empty' is meaningless there. Never report success.
+            return {**out, "ok": False}
+        # Give the book a moment to drop the selections after the legacy
+        # synthetic pass; then poll fast and sweep with REAL clicks.
+        empty = self._poll(self.slip_is_empty, timeout_s=0.6, interval_s=0.1)
+        clicks = 0
+        while not empty and clicks < SWEEP_MAX_CLICKS:
+            try:
+                marked = self._real_click(JS_MARK_SLIP_REMOVE, "slip remove")
+            except Exception as e:  # noqa: BLE001
+                return {**out, "ok": False, "error": f"sweep click failed: {e}"}
+            if not marked.get("ok"):
                 break
-            time.sleep(0.3)
-        return result
+            clicks += 1
+            time.sleep(0.15)
+            empty = self.slip_is_empty()
+        if empty:
+            out["ok"] = True
+            out["swept_clicks"] = clicks
+            return out
+        return {**out, "ok": False, "error": "slip did not clear", "swept_clicks": clicks}
+
+    def _mark(self, marker_js: str, label: str) -> dict:
+        """Run a marker payload and return its marked-selector result."""
+        marked = self._js(marker_js)
+        if not isinstance(marked, dict) or not marked.get("ok"):
+            return {
+                "ok": False,
+                "error": (marked or {}).get("error", f"no {label}"),
+            }
+        if not marked.get("selector"):
+            # A marker without a selector is unclickable. This was the
+            # Unavailable-sweep bug: the JS reported ok, the adapter was
+            # asked to click None, and the slip stayed wedged.
+            return {"ok": False, "error": f"{label} marker returned no selector"}
+        return marked
+
+    def _click_marked(self, marked: dict) -> dict:
+        try:
+            self.adapter.click(marked.get("selector"))
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"click failed: {e}"}
+
+    def _click_when_present(
+        self, marker_js: str, label: str, timeout_s: float
+    ) -> dict:
+        """Mark + click a control as soon as it appears.
+
+        The Place Bet confirmation dialog renders a beat after the click.
+        A fixed 1s sleep was both too slow on the normal path and too short
+        on a slow one; polling gets the click in as soon as the dialog
+        exists, with the same upper bound.
+        """
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        last_error = f"no {label}"
+        while True:
+            marked = self._mark(marker_js, label)
+            if marked.get("ok"):
+                clicked = self._click_marked(marked)
+                if clicked.get("ok"):
+                    return clicked
+                last_error = clicked.get("error", last_error)
+            else:
+                last_error = marked.get("error", last_error)
+            if time.monotonic() >= deadline:
+                return {"ok": False, "error": last_error}
+            time.sleep(0.1)
 
     def _real_click(self, marker_js: str, label: str) -> dict:
         """Mark an element and click it with a REAL browser click.
 
         A synthetic `element.click()` from injected script is untrusted and
         the book ignored it, so the extension's own click action is used on
-        a uniquely-marked element.
+        a uniquely-marked element. The slip widgets re-render continuously
+        and can drop the marker between marking and clicking, so ONE
+        re-mark + retry is allowed before giving up.
         """
-        marked = self._js(marker_js)
-        if not isinstance(marked, dict) or not marked.get("ok"):
-            return {"ok": False, "error": (marked or {}).get("error", f"no {label}")}
-        try:
-            self.adapter.click(marked.get("selector"))
-        except Exception as e:
-            return {"ok": False, "error": f"click failed: {e}"}
-        return {"ok": True}
+        error = None
+        for attempt in range(2):
+            marked = self._mark(marker_js, label)
+            if not marked.get("ok"):
+                return marked
+            clicked = self._click_marked(marked)
+            if clicked.get("ok"):
+                return clicked
+            error = clicked.get("error")
+            if attempt == 1:
+                break
+        return {"ok": False, "error": error or f"click failed: no {label}"}
 
     def mode(self) -> Optional[str]:
         """The betslip's mode: 'REAL' or 'SIM'."""
@@ -575,31 +854,39 @@ class BetslipDriver:
         return str(m).upper() if m else None
 
     def set_real_mode(self) -> dict:
-        """Switch the betslip to REAL mode.
+        """Best-effort switch of the betslip to REAL mode.
 
-        The book can be left in SIM (simulation) mode, and a simulation slip
-        is rejected by the order API with a bare 'Something went wrong...'.
-        A real bet requires REAL mode, so this is checked before every
-        placement.
+        The book can be left in SIM (simulation) mode, where selections
+        land on a virtual slip whose bets never touch the account. The
+        visual toggle is attempted with a marked REAL browser click, but
+        the VERIFICATION is behavioral, because the toggle widget's class
+        semantics proved unreliable: an empty slip cannot be judged, and a
+        populated slip is REAL iff it is not a simulation slip.
         """
         try:
             raw = self._evaluate(JS_REAL_MODE)
         except CaptureError as e:
-            return {"ok": False, "error": f"mode switch failed: {e}"}
+            raw = None
+            if not self.slip_is_empty():
+                return {"ok": False, "error": f"mode switch failed: {e}"}
         if isinstance(raw, str):
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                return {"ok": False, "error": "mode switch returned nothing"}
+                data = {}
         else:
             data = raw if isinstance(raw, dict) else {}
-        if not data.get("ok"):
-            return data
-        time.sleep(0.8)
-        mode = self.mode()
-        if mode not in (None, "REAL"):
-            return {"ok": False, "error": f"still in {mode} mode"}
-        return {"ok": True, "mode": mode or "REAL"}
+        if data.get("ok") and not data.get("already") and data.get("selector"):
+            try:
+                self.adapter.click(data.get("selector"))
+            except Exception as e:
+                return {"ok": False, "error": f"click failed: {e}"}
+            time.sleep(0.8)
+        # Behavioral verification — the widget lies, the slip does not.
+        slip = self.read_slip()
+        if slip.is_sim:
+            return {"ok": False, "error": "slip is in SIM (simulation) mode"}
+        return {"ok": True, "mode": "REAL" if slip.selections else "unknown"}
 
     def place_bet(self) -> dict:
         """Submit the slip. Requires an explicit opt-in at construction.
@@ -617,31 +904,59 @@ class BetslipDriver:
                 "BetslipDriver(allow_submit=True) is required to place a bet"
             )
         slip = self.read_slip()
+        if slip.is_sim:
+            # A simulation slip has no real Place Bet behind it. Try to
+            # switch the book back to REAL once, then re-judge.
+            self.set_real_mode()
+            slip = self.read_slip()
+            if slip.is_sim:
+                return {"ok": False, "error": "slip is in SIM (simulation) mode"}
         if not slip.can_place_bet:
             raise BetslipError("betslip is not placeable (no enabled Place Bet button)")
-        # The book can be left in SIM mode, and a simulation slip is rejected
-        # by the order API. A real bet needs REAL mode.
-        mode = self.set_real_mode()
-        if not mode.get("ok"):
-            return {"ok": False, "error": mode.get("error", "could not set REAL mode")}
         marked = self._real_click(JS_PLACE_BET, "Place Bet")
         if not marked.get("ok"):
             return {"ok": False, "error": marked.get("error", "place bet failed")}
         # The confirmation dialog: 'About to pay | NGN 10.00 | Cancel | Confirm'.
-        time.sleep(1.0)
-        confirmed = self._real_click(JS_MARK_CONFIRM, "Confirm")
+        # Poll for it: on the normal path it exists within a few hundred ms,
+        # so a fixed 1s sleep was pure dead time per bet.
+        confirmed = self._click_when_present(
+            JS_MARK_CONFIRM, "Confirm", timeout_s=2.0
+        )
         if not confirmed.get("ok"):
             return {
                 "ok": False,
                 "error": confirmed.get("error", "no confirmation dialog appeared"),
             }
-        # Verify from the book: a placed bet empties the slip.
+        # Verify from the book: a placed bet either empties the slip or, on
+        # this UI build, leaves the placement receipt ('Submission Successful
+        # | Total Stake | Booking Code'). The receipt is the stronger and
+        # observed-on-live-book signal; the empty slip is the older shape.
         placed = False
-        for _ in range(24):
-            time.sleep(0.5)
-            if self.slip_is_empty():
+        booking = None
+        error = "the slip did not confirm after Confirm"
+        started = time.monotonic()
+        deadline = started + 12.0
+        while time.monotonic() < deadline:
+            state = self.slip_state()
+            if state.get("insufficient"):
+                # The book REFUSED the submission on funds (dialog). Not a
+                # placed bet, and waiting longer cannot change it.
+                error = (
+                    "the book reported insufficient balance for this slip "
+                    "(stake blended above plan, or the balance is stale)"
+                )
+                break
+            if state.get("receipt"):
+                placed = True
+                booking = state.get("booking")
+                break
+            if state.get("empty"):
                 placed = True
                 break
+            # The receipt normally lands in under a second; poll fast at
+            # first, then back off so a slow book is still waited out
+            # without 24 fixed half-second sleeps.
+            time.sleep(0.1 if time.monotonic() - started < 2.0 else 0.25)
         for attr in ("data-atlas-place-bet", "data-atlas-confirm"):
             try:
                 self._evaluate(
@@ -651,7 +966,17 @@ class BetslipDriver:
                 )
             except Exception:
                 pass
+        if placed and booking is not None:
+            # Dismiss the receipt (best-effort, real click): while its modal
+            # is up the next bet's slide-in reads receipt text and fails the
+            # identity gate, burning a cycle. This click acknowledges money
+            # ALREADY placed — it cannot move anything.
+            try:
+                self._real_click(JS_DISMISS_RECEIPT, "receipt OK")
+            except Exception:
+                pass
         return {
             "ok": placed,
-            "error": None if placed else "the slip did not empty after Confirm",
+            "booking": booking,
+            "error": None if placed else error,
         }

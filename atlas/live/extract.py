@@ -1024,9 +1024,12 @@ def extract_live_match_state(
         tabs_at = len(texts)
     board = [t.strip() for t in texts[:tabs_at] if t.strip()]
 
-    # Account balance (e.g. 'NGN 166.11')
+    # Account balance (e.g. 'NGN 166.11'). Scan the whole pre-tab board, not
+    # just the first 15 nodes: the header layout changes between builds and
+    # the anchored regex cannot pick up promo copy, so a wider window only
+    # adds chances to find the real balance.
     balance_ngn: Optional[float] = None
-    for t in board[:15]:
+    for t in board:
         bm = _NGN_BALANCE_RE.match(t)
         if bm:
             try:

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -31,7 +32,7 @@ from atlas.live.extract import (
 )
 from atlas.live.observe import LiveMatchState
 
-LIVE_BOARD_URL = "https://sportybet.com/ng/sport/live/"
+LIVE_BOARD_URL = "https://www.sportybet.com/ng/sport/football/live_list/"
 LIGHT_URL = "https://sportybet.com/ng/"
 
 
@@ -61,6 +62,9 @@ class BoardCandidate:
     period: str
     num_markets: int
     index: int
+    # False for a scheduled/pre-match row: the list also carries upcoming
+    # kick-offs, and opening one trades live pricing for a pre-match panel.
+    live: bool = True
 
 
 class CaptureError(RuntimeError):
@@ -89,10 +93,27 @@ class LiveCapture:
         # Scales the waits in the recovery path so tests do not pay for them.
         self.pause_scale = max(0.0, pause_scale)
         self._loaded = False
+        # Where the tab actually is (last successful URL read) and the last
+        # browser-level failure. The heartbeat publishes both: "the board is
+        # empty" is unactionable when the real fault is a daemon 502 or a tab
+        # parked on another page.
+        self.last_href: str = ""
+        self.last_transport_error: str = ""
+        # Serialises PAGE MUTATIONS (navigate / reload / tab / panel clicks)
+        # against the placement worker's betslip flow. LiveRunner replaces
+        # this with its own re-entrant lock so the whole process agrees on
+        # one page owner. READ paths deliberately do not take it: the cycle
+        # must keep pricing while a placement is in flight.
+        self.page_lock = threading.RLock()
         # Consecutive failed probes: after a few, the session is treated as
         # dead rather than flaky, so the loop fails fast instead of waiting
         # out the daemon's timeout on every call.
         self._consecutive_failures = 0
+        # True when the last session check could not read the page at all.
+        # 'expired: False' then means UNKNOWN, not 'logged in'; the heartbeat
+        # publishes this so an unattached extension cannot hide behind a
+        # healthy-looking session (2026-10-30).
+        self.session_probe_failed = False
 
     # --- browser primitives ---------------------------------------------
 
@@ -114,13 +135,32 @@ class LiveCapture:
         last: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
-                data = self._unwrap(self.adapter.evaluate(code))
+                # Read-only scans use the CDP-capable path when the adapter
+                # offers it: a dead renderer still answers through CDP.
+                evaluate = (
+                    getattr(self.adapter, "evaluate_safe", None)
+                    or self.adapter.evaluate
+                )
+                data = self._unwrap(evaluate(code))
                 self._consecutive_failures = 0
+                self.last_transport_error = ""
                 if isinstance(data, dict) and "value" in data:
                     return data["value"]
                 return data
             except Exception as e:  # the extension intermittently fails
                 last = e
+                transient = bool(getattr(e, "transient", False))
+                if transient or "daemon call" in str(e):
+                    self.last_transport_error = str(e)
+                if transient:
+                    # The daemon said it is wedged/restarting (5xx or a
+                    # transport error) after its own bounded retries. That is
+                    # a BROWSER fault, not evidence that the page is empty,
+                    # and another full round only burns the cycle's budget.
+                    raise CaptureError(
+                        "browser automation unreachable (the local daemon "
+                        f"did not answer): {e}"
+                    ) from e
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= 2:
                     # The session is dead, not flaky. Every further probe
@@ -146,12 +186,97 @@ class LiveCapture:
         tree = data.get("tree") or [] if isinstance(data, dict) else []
         return iter_texts(tree)
 
-    def board_loaded(self) -> bool:
+    # The book's live URLs, as served on 2026-10-29:
+    #   board: /ng/sport/football/live_list/   (Multi View)
+    #   match: /ng/sport/football/live/<Country>/<Comp>/<Home>_vs_<Away>/sr:match:<id>
+    # and the older /ng/sport/live/ still redirects into the first shape. The
+    # gate must accept all three: matching only '/sport/live' made this
+    # permanently False, so every capture() re-navigated the board to the
+    # site root and threw away the match panel it had just opened (the loop
+    # then read Multi View, found no market tables, and reported "the board
+    # is empty" forever).
+    LIVE_URL_MARKERS = ("/sport/live", "/live_list", "/sr:match:")
+    BOARD_LIST_MARKERS = ("/live_list",)
+    MATCH_MARKERS = ("/sr:match:", "/football/live/")
+
+    def current_url(self) -> str:
+        """The tab's REAL URL, cached for the heartbeat and the nav checks."""
         try:
             href = self._evaluate("location.href")
         except CaptureError:
+            return ""
+        if isinstance(href, str) and href:
+            self.last_href = href.strip('"')
+        return self.last_href
+
+    def at_board_list(self) -> bool:
+        return any(m in self.last_href for m in self.BOARD_LIST_MARKERS)
+
+    def at_match(self) -> bool:
+        return any(m in self.last_href for m in self.MATCH_MARKERS)
+
+    def board_row_count(self) -> int:
+        try:
+            raw = self._evaluate(
+                "document.querySelectorAll('.match-row').length"
+            )
+        except CaptureError:
+            return 0
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
+    def board_loaded(self) -> bool:
+        """True when the tab is on the board LIST or on a match panel.
+
+        The bare hub (/sport/live/) is deliberately NOT accepted: it matches
+        the live-URL marker but hosts neither the list nor a panel, and the
+        loop sat on it reporting "the board is empty" while the real list
+        was one route away (2026-10-29). On the hub, rows decide.
+        """
+        href = self.current_url()
+        if not href:
             return False
-        return isinstance(href, str) and "/sport/live" in href
+        if self.at_board_list() or self.at_match():
+            return True
+        if any(marker in href for marker in self.LIVE_URL_MARKERS):
+            return self.board_row_count() > 0
+        return False
+
+    def _wait_until(self, predicate: Any, timeout_s: float) -> bool:
+        """Poll a predicate, scaled by pause_scale so tests pay nothing."""
+        deadline = time.monotonic() + timeout_s * self.pause_scale
+        while True:
+            if predicate():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(max(0.05, 0.25 * self.pause_scale))
+
+    def _on_board_list(self) -> bool:
+        self.current_url()
+        return self.at_board_list()
+
+    def board_failure_reason(self, fallback: str) -> str:
+        """Say WHAT failed: browser, route, or a genuinely empty feed.
+
+        "the board is empty" was reported for a daemon 502, a tab parked on
+        another route, and a real empty board alike — three different
+        operator actions behind one message (2026-10-29).
+        """
+        where = self.last_href or "unknown page"
+        if self.last_transport_error:
+            return (
+                "browser automation unreachable — no page could be read "
+                f"({self.last_transport_error}); last known page {where}"
+            )
+        if not self.at_board_list() and not self.at_match():
+            return (
+                f"{fallback} — the tab is not on the live board list, so "
+                f"navigation did not arrive (last page {where})"
+            )
+        return f"{fallback} (last page {where})"
 
     def load_board(self, force: bool = False) -> None:
         """Get the live board loaded, working around the never-firing 'load'.
@@ -163,29 +288,65 @@ class LiveCapture:
         In Multi View the whole board is shown; in Single View one match is.
         The board is left in Multi View because the match selection needs the
         list of live matches.
+
+        Arrival is VERIFIED against location.href before the board is used.
+        The old fixed sleeps declared success blindly: the loop could scan
+        the previous document forever while reporting "board empty"
+        (2026-10-29).
         """
-        if self.board_loaded() and not force:
-            self._loaded = True
+        with self.page_lock:
+            if self.board_loaded() and not force:
+                self._loaded = True
+                self.ensure_multi_view()
+                return
+            self._loaded = False
+            # 1. A light page re-registers a tab the extension stopped
+            #    answering on.
+            try:
+                self.adapter.navigate(LIGHT_URL)
+            except Exception:
+                pass
+            time.sleep(0.5 * self.pause_scale)
+            # 2. Client-side hop: no load event to wait for.
+            try:
+                self._evaluate(f"location.href={json.dumps(self.url)}; 1")
+            except CaptureError:
+                pass
+            arrived = self._wait_until(self._on_board_list, 8.0)
+            if not arrived:
+                # A crashed renderer cannot run the client-side hop; CDP is
+                # handled by the browser process and still can.
+                cdp = getattr(self.adapter, "cdp", None)
+                if callable(cdp):
+                    try:
+                        cdp("Page.navigate", {"url": LIGHT_URL})
+                    except Exception:
+                        pass
+                    time.sleep(0.5 * self.pause_scale)
+                    try:
+                        self._evaluate(
+                            f"location.href={json.dumps(self.url)}; 1"
+                        )
+                    except CaptureError:
+                        pass
+                    arrived = self._wait_until(self._on_board_list, 8.0)
+            if not arrived:
+                # The SPA router sometimes needs a reload to mount the list.
+                try:
+                    self._evaluate("location.reload(); 1")
+                except CaptureError:
+                    pass
+                arrived = self._wait_until(self._on_board_list, 6.0)
+            if arrived and self.board_row_count() == 0:
+                # The list mounted but is still filling in: the board's own
+                # data lags the route, and a reload populates it.
+                try:
+                    self._evaluate("location.reload(); 1")
+                except CaptureError:
+                    pass
+                self._wait_until(lambda: self.board_row_count() > 0, 6.0)
+            self._loaded = arrived
             self.ensure_multi_view()
-            return
-        try:
-            self.adapter.navigate(LIGHT_URL)
-        except Exception:
-            pass
-        time.sleep(2.0)
-        try:
-            self._evaluate(f"location.href={json.dumps(self.url)}; 1")
-        except CaptureError:
-            pass
-        # The board's own data needs a moment; a reload populates it.
-        time.sleep(4.0)
-        try:
-            self._evaluate("location.reload(); 1")
-        except CaptureError:
-            pass
-        time.sleep(3.0)
-        self._loaded = True
-        self.ensure_multi_view()
 
     JS_MULTI_VIEW = r"""
     (() => {
@@ -204,18 +365,19 @@ class LiveCapture:
     def ensure_multi_view(self) -> bool:
         """The match selection needs the LIST of live matches, which is the
         Multi View board. Single View shows one match at a time."""
-        try:
-            raw = self._evaluate(self.JS_MULTI_VIEW)
-        except CaptureError:
+        with self.page_lock:
+            try:
+                raw = self._evaluate(self.JS_MULTI_VIEW)
+            except CaptureError:
+                return False
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, json.JSONDecodeError):
+                return False
+            if isinstance(data, dict) and data.get("ok"):
+                time.sleep(1.5)
+                return True
             return False
-        try:
-            data = json.loads(raw) if isinstance(raw, str) else raw
-        except (TypeError, json.JSONDecodeError):
-            return False
-        if isinstance(data, dict) and data.get("ok"):
-            time.sleep(1.5)
-            return True
-        return False
 
     # --- session health ---------------------------------------------------
 
@@ -253,18 +415,36 @@ class LiveCapture:
         renders the login form, and a loop that does not notice just keeps
         planning against a board it can no longer bet on.
         """
+        # An unreadable page is NOT "logged in". `expired` stays False so
+        # callers that only branch on it keep working, but `probe_failed`
+        # says the answer is unknown — the extension answering 502 with no
+        # tab used to look exactly like a healthy session (2026-10-30).
+        self.session_probe_failed = False
         try:
             raw = self._evaluate(self.JS_SESSION)
-        except CaptureError:
-            return {"expired": False}
+        except CaptureError as e:
+            self.session_probe_failed = True
+            return {"expired": False, "probe_failed": True, "error": str(e)}
         if isinstance(raw, str):
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                return {"expired": False}
+                self.session_probe_failed = True
+                return {
+                    "expired": False,
+                    "probe_failed": True,
+                    "error": "session probe returned nothing",
+                }
         else:
             data = raw if isinstance(raw, dict) else {}
-        return data or {"expired": False}
+        if not data:
+            self.session_probe_failed = True
+            return {
+                "expired": False,
+                "probe_failed": True,
+                "error": "session probe returned nothing",
+            }
+        return data
 
     # --- capture ---------------------------------------------------------
 
@@ -282,15 +462,16 @@ class LiveCapture:
 
     def hide_media_overlay(self) -> bool:
         """Collapse an expanded media widget that is covering the scoreboard."""
-        try:
-            raw = self._evaluate(self.JS_HIDE_MEDIA)
-        except CaptureError:
-            return False
-        try:
-            data = json.loads(raw) if isinstance(raw, str) else raw
-        except (TypeError, json.JSONDecodeError):
-            return False
-        return bool(isinstance(data, dict) and data.get("ok"))
+        with self.page_lock:
+            try:
+                raw = self._evaluate(self.JS_HIDE_MEDIA)
+            except CaptureError:
+                return False
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, json.JSONDecodeError):
+                return False
+            return bool(isinstance(data, dict) and data.get("ok"))
 
     def read_scoreboard(self) -> dict:
         """Read the live scoreboard from the DOM.
@@ -339,15 +520,16 @@ class LiveCapture:
 
     def close_stats_panel(self) -> bool:
         """Return to the market panel after reading the statistics."""
-        try:
-            raw = self._evaluate(self.JS_CLOSE_STATS)
-        except CaptureError:
-            return False
-        try:
-            data = json.loads(raw) if isinstance(raw, str) else raw
-        except (TypeError, json.JSONDecodeError):
-            return False
-        return bool(isinstance(data, dict) and data.get("ok"))
+        with self.page_lock:
+            try:
+                raw = self._evaluate(self.JS_CLOSE_STATS)
+            except CaptureError:
+                return False
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, json.JSONDecodeError):
+                return False
+            return bool(isinstance(data, dict) and data.get("ok"))
 
     def read_stats(self) -> dict:
         """Open the Statistics panel and read the live statistics.
@@ -359,27 +541,28 @@ class LiveCapture:
         """
         from atlas.live.extract import extract_stats_js
 
-        try:
-            self._evaluate(self.JS_OPEN_STATS)
-        except CaptureError:
-            return {}
-        # The panel loads asynchronously.
-        for _ in range(6):
-            time.sleep(0.8 * self.pause_scale)
+        with self.page_lock:
             try:
-                raw = self._evaluate(extract_stats_js())
+                self._evaluate(self.JS_OPEN_STATS)
             except CaptureError:
-                continue
-            if isinstance(raw, str):
+                return {}
+            # The panel loads asynchronously.
+            for _ in range(6):
+                time.sleep(0.8 * self.pause_scale)
                 try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
+                    raw = self._evaluate(extract_stats_js())
+                except CaptureError:
                     continue
-                if data:
-                    return data
-            elif isinstance(raw, dict) and raw:
-                return raw
-        return {}
+                if isinstance(raw, str):
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if data:
+                        return data
+                elif isinstance(raw, dict) and raw:
+                    return raw
+            return {}
 
     @staticmethod
     def apply_stats(state: LiveMatchState, stats: dict) -> LiveMatchState:
@@ -472,59 +655,93 @@ class LiveCapture:
 
     def open_markets_tab(self) -> bool:
         """Make sure the market panel (and its scoreboard) is the active tab."""
-        try:
-            raw = self._evaluate(self.JS_OPEN_MARKETS_TAB)
-        except CaptureError:
-            return False
-        try:
-            data = json.loads(raw) if isinstance(raw, str) else raw
-        except (TypeError, json.JSONDecodeError):
-            return False
-        return bool(isinstance(data, dict) and data.get("ok"))
+        with self.page_lock:
+            try:
+                raw = self._evaluate(self.JS_OPEN_MARKETS_TAB)
+            except CaptureError:
+                return False
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, json.JSONDecodeError):
+                return False
+            return bool(isinstance(data, dict) and data.get("ok"))
 
     def recover(self) -> bool:
-        """Recover a wedged browser tab.
+        """Recover a wedged tab, escalating only as far as needed.
 
         The extension intermittently stops answering on the heavy live page
-        (the daemon returns 502). Navigating to a light page re-registers
-        the tab, and the extension starts answering again — but only after a
-        moment, so the follow-up is retried rather than assumed.
+        (the daemon returns 502). Escalation:
+          1. navigate to a light page (re-registers a merely stuck tab),
+          2. CDP Page.navigate (handled by the browser process, not the
+             page's stuck JS thread),
+          3. close the frozen TAB — never the whole session — and open a
+             fresh one.
+
+        Order matters: the old code closed the SESSION before proving it
+        could reopen one, so a failed reopen left no tab at all and every
+        later call answered "session not found" (2026-10-29).
         """
-        navigated = False
-        try:
-            # A FROZEN tab cannot be navigated: the navigation is queued to
-            # the page, and the page's JS thread is what is stuck. Closing the
-            # session discards the frozen tab, and a fresh one is healthy.
-            try:
-                self.adapter.close_session()
-                time.sleep(1.5 * self.pause_scale)
-            except Exception:
-                pass
-            self.adapter.navigate(LIGHT_URL)
-            navigated = True
-        except Exception:
-            pass
-        if navigated:
-            time.sleep(2.5 * self.pause_scale)
-            # The tab re-registers asynchronously; wait for it to answer.
-            for _ in range(6):
+        with self.page_lock:
+            href = self.current_url()
+            crashed = href.startswith("chrome-error://") or href == "about:blank"
+            alive = False
+            if not crashed:
+                # A live tab accepts a normal navigation; a crashed one
+                # would only hang the extension for its full timeout.
                 try:
-                    self._evaluate("1")
-                    break
+                    self.adapter.navigate(LIGHT_URL)
+                    alive = self._wait_until(self._usable, 6.0)
+                except Exception:
+                    pass
+            if not alive:
+                cdp = getattr(self.adapter, "cdp", None)
+                if callable(cdp):
+                    try:
+                        cdp("Page.navigate", {"url": LIGHT_URL})
+                    except Exception:
+                        pass
+                    alive = self._wait_until(self._usable, 6.0)
+            if not alive:
+                try:
+                    self.adapter.close_tab()
+                except Exception:
+                    pass
+                try:
+                    self.adapter.navigate(LIGHT_URL)
+                except Exception:
+                    pass
+                alive = self._wait_until(self._usable, 8.0)
+            # Put the tab back on the board whether or not it answered: the
+            # next capture must never read the light page.
+            try:
+                self._evaluate(f"location.href={json.dumps(self.url)}; 1")
+            except CaptureError:
+                pass
+            self._wait_until(self._on_board_list, 6.0)
+            if self.board_row_count() == 0:
+                try:
+                    self._evaluate("location.reload(); 1")
                 except CaptureError:
-                    time.sleep(1.5 * self.pause_scale)
+                    pass
+                self._wait_until(lambda: self.board_row_count() > 0, 4.0)
+            self._loaded = True
+            return alive
+
+    def _responsive(self) -> bool:
         try:
-            self._evaluate(f"location.href={json.dumps(self.url)}; 1")
+            self._evaluate("1", retries=0)
+            return True
         except CaptureError:
-            pass
-        time.sleep(4.0 * self.pause_scale)
-        try:
-            self._evaluate("location.reload(); 1")
-        except CaptureError:
-            pass
-        time.sleep(3.0 * self.pause_scale)
-        self._loaded = True
-        return True
+            return False
+
+    def _usable(self) -> bool:
+        """Responsive AND on a real page (not a crashed-tab error page)."""
+        href = self.current_url()
+        if not href:
+            return False
+        if href.startswith("chrome-error://") or href == "about:blank":
+            return False
+        return self._responsive()
 
     def open_match(self, url: str, wait_s: float = 25.0) -> bool:
         """Open a match by its DIRECT url and wait for its panel.
@@ -540,14 +757,15 @@ class LiveCapture:
         except CaptureError:
             return False
         deadline = time.monotonic() + wait_s
-        while time.monotonic() < deadline:
-            time.sleep(2.0)
-            try:
-                if self.read_markets_dom():
-                    return True
-            except Exception:
-                continue
-        return False
+        with self.page_lock:
+            while time.monotonic() < deadline:
+                time.sleep(2.0)
+                try:
+                    if self.read_markets_dom():
+                        return True
+                except Exception:
+                    continue
+            return False
 
     def match_url(self) -> Optional[str]:
         """The url of the match currently open, if it is a match page."""
@@ -659,6 +877,20 @@ class LiveCapture:
                     observed_at=datetime.now(timezone.utc),
                     match_id=self.match_id,
                 )
+            # On the BOARD (not a match panel) there is nothing to wait for:
+            # return at once so switch_match can open a live match. Waiting
+            # out max_wait_s here burned ~90s per rotation and hammered the
+            # heavy list with snapshots until its renderer crashed
+            # (2026-10-29).
+            if self.at_board_list():
+                rows = self.board_row_count()
+                if rows > 0:
+                    return CaptureResult(
+                        False,
+                        f"on the live board ({rows} rows) — no match selected",
+                        observed_at=datetime.now(timezone.utc),
+                        match_id=self.match_id,
+                    )
             # The DOM is the primary path; the snapshot is the fallback.
             markets = self.read_markets_dom()
             texts: list[str] = []
@@ -689,7 +921,10 @@ class LiveCapture:
                     if time.monotonic() >= deadline:
                         return CaptureResult(
                             False,
-                            "the board is empty (the live feed is not delivering)",
+                            self.board_failure_reason(
+                                "the board is empty (the live feed is not "
+                                "delivering)"
+                            ),
                             markets=markets,
                             observed_at=datetime.now(timezone.utc),
                             match_id=self.match_id,
@@ -751,10 +986,17 @@ class LiveCapture:
                 )
             reason = why
             # If the scoreboard is missing but the media widget is expanded,
-            # collapse it once and try again.
+            # collapse it once and try again. The period case is included:
+            # "period not live (got 'unknown')" comes from exactly the same
+            # hidden-scoreboard condition, and the widget sits over the only
+            # place the clock and period exist.
             if (
                 not media_hidden
-                and ("score unknown" in why or "clock unknown" in why)
+                and (
+                    "score unknown" in why
+                    or "clock unknown" in why
+                    or "period not live" in why
+                )
                 and time.monotonic() < deadline
             ):
                 media_hidden = self.hide_media_overlay()
@@ -773,6 +1015,172 @@ class LiveCapture:
             time.sleep(self.poll_s)
 
     # --- the board's match list -----------------------------------------
+
+    JS_LIST_FALLBACK = r"""
+    (() => {
+      // Class-independent live-match rows, v2 — CLOCK-ANCHORED.
+      // Ground truth from the live board (2026-10-28, 49 matches rendered,
+      // 0 rows found by the old shape): each match row renders its teams in
+      // SEPARATE spans — the visible 'vs' is styling, not text — so the
+      // leaf 'Home v Away' shape never matches. The stable anchor is the
+      // live CLOCK leaf ("80:10") beside a period chip ("H2"). From every
+      // clock leaf we climb to the smallest ancestor that also carries
+      // decimal odds — that container is the match row. Teams are read
+      // from the row text: the alphabetic run between the clock/period
+      // prefix and the score digits is the home team; the run between the
+      // score and the first decimal price is the away team. The click that
+      // opens a match is always a marked REAL click on the marked row.
+      const rows = [];
+      const seen = new Set();
+      // scores are single-or-two digit tokens; '1923 Kragujevac' keeps its
+      // year in the team name because 1923 cannot be a score
+      const isScore = (s) => /^\d{1,2}$/.test(s);
+      for (const e of document.querySelectorAll('*')) {
+        if (e.children.length) continue;
+        const txt = (e.textContent || '').trim();
+        if (!/^\d{1,3}:\d{2}$/.test(txt)) continue;
+        // Leftover BETSLIP selections render odds text too; a slip row
+        // classified as a board row traps the picker back into the same
+        // parked match.
+        if (e.closest && e.closest('[class*=betslip],[class*=m-order],[class*=slip]')) continue;
+        // Climb to the enclosing row: smallest container with the odds
+        // cluster AND exactly ONE live clock — a container holding two
+        // clocks has swallowed neighbouring matches and must not be a
+        // click target.
+        const clocksIn = (t) => (t.match(/\d{1,3}:\d{2}/g) || []).length;
+        let row = e;
+        let ok = false;
+        for (let up = 0; up < 8; up++) {
+          const t = row.innerText || '';
+          const prices = (t.match(/\b\d{1,3}\.\d{2}\b/g) || []).length;
+          if (prices >= 3 && clocksIn(t) <= 1) { ok = true; break; }
+          if (!row.parentElement) break;
+          row = row.parentElement;
+        }
+        if (!ok) continue;
+        const text = (row.innerText || '').replace(/\s+/g, ' ').trim();
+        const key = text.slice(0, 60);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        // Teams from text: everything from the CLOCK onwards, periods and
+        // scores are digits so they cannot be confused with team words.
+        const at = text.search(/\d{1,3}:\d{2}/);
+        let seg = at >= 0 ? text.slice(at) : text;
+        const pfx = seg.match(/^\d{1,3}:\d{2}\s*(?:H1|H2|HT|Penalty|AET|Pen)?\s*/);
+        if (pfx) seg = seg.slice(pfx[0].length);
+        const tokens = seg.split(' ');
+        let i = 0;
+        const home = [];
+        const away = [];
+        while (i < tokens.length && !isScore(tokens[i])) { home.push(tokens[i]); i++; }
+        while (i < tokens.length && isScore(tokens[i])) i++;
+        const priceRe = /^\d{1,3}\.\d{2}$/;
+        while (
+          i < tokens.length
+          && !isScore(tokens[i])
+          && !priceRe.test(tokens[i])
+          && !/^[+]\d+$/.test(tokens[i])   // '+66' more-markets chips
+        ) {
+          away.push(tokens[i]); i++;
+        }
+        if (!home.length || !away.length) continue;
+        const periodM = text.match(/\b(H1|H2|HT|Penalty|AET)\b/);
+        const rowIdx = rows.length;
+        if (!row.offsetParent) continue;
+        row.setAttribute('data-atlas-live-row', String(rowIdx));
+        rows.push({
+          i: rowIdx,
+          home: home.join(' ').slice(0, 45),
+          away: away.join(' ').slice(0, 45),
+          clock: txt,
+          period: periodM ? periodM[1] : '',
+          score: '',
+          odds: ((text.match(/\b\d{1,3}\.\d{2}\b/g) || []).length),
+          text: text.slice(0, 140),
+        });
+        if (rows.length >= 40) break;
+      }
+      return JSON.stringify({rows: rows, mode: 'clock'});
+    })()
+    """
+
+    JS_ROWS_TEXT = r"""
+    (() => {
+      // v3 — structural .match-row scan (ground truth 2026-10-29).
+      // The list keeps .match-row but the row build varies: classes get
+      // renamed and the clock is split across child spans. Read the row
+      // STRUCTURE first (.teams children 0/1 = home/away, .time child 0 =
+      // clock), then leaf order. NEVER split the row text into teams:
+      // 'Everton Newcastle 2 0' has no delimiter between the names.
+      // marker: rows-text
+      const rows = [];
+      const seen = new Set();
+      const periodRe = /\b(H1|H2|HT|Penalty|AET)\b/;
+      const textOf = (el) => ((el && el.innerText) || '')
+        .replace(/\s+/g, ' ').trim();
+      document.querySelectorAll('.match-row').forEach((row, i) => {
+        // getClientRects() (not offsetParent): a virtualised/transformed
+        // list gives visible rows offsetParent === null, which would
+        // discard every row.
+        if (!row.getClientRects || row.getClientRects().length === 0) return;
+        const text = textOf(row);
+        if (!text) return;
+        const cm = text.match(/\b\d{1,3}:\d{2}\b/);
+        if (!cm) return;
+        const key = text.slice(0, 60);
+        if (seen.has(key)) return;
+        let clock = cm[0];
+        let home = '';
+        let away = '';
+        const teams = row.querySelector('.teams');
+        if (teams && teams.children.length >= 2) {
+          home = textOf(teams.children[0]);
+          away = textOf(teams.children[1]);
+        }
+        if (!home || !away) {
+          home = textOf(row.querySelector('.home-team'));
+          away = textOf(row.querySelector('.away-team'));
+        }
+        const time = row.querySelector('.time');
+        if (time) {
+          const first = time.children[0];
+          const tm = textOf(first || time).match(/\b\d{1,3}:\d{2}\b/);
+          if (tm) clock = tm[0];
+        }
+        if (!home || !away) {
+          // Last resort: the first two text leaves that are neither the
+          // clock nor the match id (each team is one leaf on this build).
+          const leaves = Array.from(row.querySelectorAll('*'))
+            .filter((e) => !e.children.length)
+            .map(textOf)
+            .filter((t) => t && /[A-Za-z]/.test(t) && !/^ID:/.test(t)
+                        && !/Multi View|Statistics|H2H/.test(t));
+          if (leaves.length >= 2) {
+            home = leaves[0];
+            away = leaves[1];
+          }
+        }
+        if (!home || !away) return;
+        seen.add(key);
+        const periodM = text.match(periodRe);
+        // DOM index, not output index: select_match clicks rows[index] on
+        // the raw .match-row list, so both scanners must speak that order.
+        const idx = i;
+        row.setAttribute('data-atlas-live-row', String(idx));
+        rows.push({
+          i: idx,
+          home: home.slice(0, 45),
+          away: away.slice(0, 45),
+          clock: clock,
+          period: periodM ? periodM[1] : '',
+          score: '',
+          odds: (text.match(/\b\d{1,3}\.\d{2}\b/g) || []).length,
+          text: text.slice(0, 140),
+        });
+      });
+      return JSON.stringify({rows: rows, mode: 'rows'});
+    })()
+    """
 
     JS_CARDS = r"""
     (() => {
@@ -832,18 +1240,46 @@ class LiveCapture:
             "SUSPENDED",
         )
 
-    def board_candidates(self) -> list[BoardCandidate]:
-        """Every live match on the board, for the Boss to choose between."""
+    def _scan_rows(self, script: str) -> list[dict]:
+        """Run one board scanner; failures are an empty scan, not a crash."""
         try:
-            raw = self._evaluate(self.JS_CARDS)
+            raw = self._evaluate(script)
         except CaptureError:
             return []
         try:
             data = json.loads(raw) if isinstance(raw, str) else raw
         except (TypeError, json.JSONDecodeError):
             return []
+        rows = (data or {}).get("rows", []) if isinstance(data, dict) else []
+        return [r for r in rows if isinstance(r, dict)]
+
+    def board_candidates(self) -> list[BoardCandidate]:
+        """Every live match on the board, for the Boss to choose between.
+
+        The two scanners see different ROW BUILDS, not different boards:
+        on 2026-10-29 the class-shaped scan saw 12 of 24 rows (some rows
+        omit .home-team) while the structural scan saw all 24. Run both and
+        merge — a missing row is a match the loop can never trade.
+        """
+        rows = self._scan_rows(self.JS_CARDS)
+        seen = {
+            ((r.get("home") or "").upper(), (r.get("away") or "").upper())
+            for r in rows
+        }
+        for r in self._scan_rows(self.JS_ROWS_TEXT):
+            key = ((r.get("home") or "").upper(), (r.get("away") or "").upper())
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(r)
+        if not rows:
+            # The book rebuilds its UI classes; the class-shaped scans above
+            # can find nothing even while the list renders. Fall back to a
+            # class-independent scan: any leaf text that looks like
+            # 'Home v Away' inside a list region that also carries prices.
+            rows = self._scan_rows(self.JS_LIST_FALLBACK)
         out: list[BoardCandidate] = []
-        for e in (data or {}).get("rows", []):
+        for e in rows:
             home = (e.get("home") or "").strip()
             away = (e.get("away") or "").strip()
             if not home or not away:
@@ -863,9 +1299,22 @@ class LiveCapture:
                     period=period or clock,
                     num_markets=int(e.get("odds") or 0),
                     index=int(e.get("i", 0)),
+                    live=self._is_live_period(period),
                 )
             )
         return out
+
+    # Period labels that mean the match is being played. The list also
+    # carries upcoming kick-offs ('14:30 ID: 15728'): they have no period,
+    # and opening one trades live pricing for a pre-match panel.
+    LIVE_PERIOD_MARKERS = (
+        "H1", "H2", "1H", "2H", "HT", "1ST", "2ND", "HALF", "PEN", "AET",
+    )
+
+    @classmethod
+    def _is_live_period(cls, period: str) -> bool:
+        p = (period or "").upper()
+        return any(marker in p for marker in cls.LIVE_PERIOD_MARKERS)
 
     @staticmethod
     def _parse_minute(period: str) -> Optional[float]:
@@ -887,6 +1336,47 @@ class LiveCapture:
         m = re.search(r"(\d{1,3})\s*['\u2019]", text)
         if m:
             return float(m.group(1))
+
+    # --- account balance (board header, no panel needed) -------------------
+
+    JS_BALANCE = r"""
+    (() => {
+      // The header renders the balance beside the next control:
+      // 'NGN 52.68Deposit' — innerText glues it on, so the terminator is
+      // 'anything that cannot continue a number', not a newline.
+      const t = document.body ? (document.body.innerText || '') : '';
+      const m = t.match(/(?:^|[\n|])\s*(?:NGN|\u20a6)\s*([\d,]+\.\d{2})(?=[^\d,]|$)/m);
+      return JSON.stringify({
+        balance: m ? parseFloat(m[1].replace(/,/g, '')) : null
+      });
+    })()
+    """
+
+    def read_balance_ngn(self) -> Optional[float]:
+        """The header account balance — readable on EVERY page.
+
+        The match-panel extraction carries the balance only while a panel is
+        open, so in board mode (or while the board is empty) the balance
+        guard was blind all night: heartbeat account_balance_ngn stayed None
+        while the header plainly showed NGN 52.68 (2026-10-28).
+        """
+        try:
+            raw = self._evaluate(self.JS_BALANCE)
+        except CaptureError:
+            return None
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        val = data.get("balance")
+        if not isinstance(val, (int, float)):
+            return None
+        # Sanity: a real account balance is a small non-negative number.
+        if not (0.0 <= float(val) <= 10_000_000.0):
+            return None
+        return float(val)
         # A spaced score ('1 : 0') is not a clock.
         if re.search(r"\d\s*:\s*\d", text):
             return None
@@ -904,27 +1394,60 @@ class LiveCapture:
         const row = rows[target];
         if (!row) return JSON.stringify({ok: false, error: 'no row'});
         const cell = row.querySelector('.home-team') || row;
-        cell.click();
-        return JSON.stringify({ok: true, mode: 'multi'});
+        // NO synthetic click: this UI build ignores untrusted events (the
+        // login form proved it). Mark the target for a REAL browser click.
+        cell.setAttribute('data-atlas-open-match', '1');
+        return JSON.stringify({ok: true, mode: 'multi', selector: '[data-atlas-open-match="1"]'});
       }
       // Single View: a card per match.
       const cards = Array.from(document.querySelectorAll('.sr-lmt-plus-scb__wrapper'));
       const card = cards[target];
-      if (!card) return JSON.stringify({ok: false, error: 'no card'});
-      const clickable = card.querySelector('.sr-lmt-plus-scb__team-title') || card;
-      clickable.click();
-      return JSON.stringify({ok: true, mode: 'single'});
+      if (card) {
+        const clickable = card.querySelector('.sr-lmt-plus-scb__team-title') || card;
+        clickable.setAttribute('data-atlas-open-match', '1');
+        return JSON.stringify({ok: true, mode: 'single', selector: '[data-atlas-open-match="1"]'});
+      }
+      // Class-independent fallback: the rows the list scan marked with
+      // data-atlas-live-row (the reunited shape when the board re-skins).
+      const fb = document.querySelector('[data-atlas-live-row="' + target + '"]');
+      if (fb) {
+        fb.setAttribute('data-atlas-open-match', '1');
+        return JSON.stringify({ok: true, mode: 'fallback', selector: '[data-atlas-open-match="1"]'});
+      }
+      return JSON.stringify({ok: false, error: 'no row'});
     })()
     """
 
     def select_match(self, index: int) -> bool:
-        """Open a specific match from the board list."""
+        """Open a specific match from the board list.
+
+        The click must be a REAL browser click: the list's handlers ignore
+        synthetic element.click() events on this UI build, so a marked
+        element is clicked through the adapter.
+        """
         try:
-            raw = self._evaluate(self.JS_SELECT % {"index": index})
+            with self.page_lock:
+                raw = self._evaluate(self.JS_SELECT % {"index": index})
+                try:
+                    data = json.loads(raw) if isinstance(raw, str) else raw
+                except (TypeError, json.JSONDecodeError):
+                    return False
+                if not (
+                    isinstance(data, dict)
+                    and data.get("ok")
+                    and data.get("selector")
+                ):
+                    return False
+                # One re-mark retry: the list re-renders and can drop a marker.
+                for _ in range(2):
+                    try:
+                        self.adapter.click(data.get("selector"))
+                        return True
+                    except Exception:
+                        try:
+                            self._evaluate(self.JS_SELECT % {"index": index})
+                        except CaptureError:
+                            return False
+                return False
         except CaptureError:
             return False
-        try:
-            data = json.loads(raw) if isinstance(raw, str) else raw
-        except (TypeError, json.JSONDecodeError):
-            return False
-        return bool(isinstance(data, dict) and data.get("ok"))

@@ -166,11 +166,80 @@ class BrowserTools:
             "sample_markets": [m["market_label"] for m in priced[:8]],
         }
 
-    def fill_login(self) -> dict:
-        """Fill and submit the login form.
+    # --- login -----------------------------------------------------------
 
-        The credentials come from the environment, so they are never part of
-        the model's context.
+    def _eval_json(self, code: str) -> dict:
+        """Run a JSON-returning payload and normalise the transport envelope.
+
+        The extension answers `{"value": "<json>"}` and the CDP fallback
+        answers `{"type": "string", "value": "<json>"}`; a payload that threw
+        answers nothing. Every login step wants a dict, so unwrap both here
+        rather than repeating the dance at each call site.
+        """
+        raw = self.capture.adapter.evaluate(code)
+        data = raw.get("data", raw) if isinstance(raw, dict) else raw
+        if isinstance(data, dict) and "value" in data:
+            data = data["value"]
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": "payload returned nothing"}
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "payload returned nothing"}
+        return data
+
+    @staticmethod
+    def _phone_candidates(phone: str) -> list:
+        """The phone shapes the book accepts behind its `+234` prefix.
+
+        The configured number is tried first. The live form shows `+234` and
+        validates the rest of the field, so a leading 0 may or may not belong
+        there — only the page can decide, and it says so by enabling (or
+        refusing to enable) the Login button.
+        """
+        out = [phone]
+        if phone.startswith("0"):
+            out.append(phone[1:])
+        elif len(phone) == 10:
+            out.append("0" + phone)
+        return [c for c in out if c]
+
+    def _wait_login_button(self, adapter: Any, timeout: float = 6.0) -> dict:
+        """Wait for the Login button to lose `disabled`/`is-disabled`.
+
+        React enables it a tick after it accepts both fields, so a single
+        look right after filling is a race — and losing that race is what
+        made the old payload report 'no visible login button' every cycle.
+        """
+        deadline = time.time() + timeout
+        last: dict = {"ok": False, "error": "login button not found"}
+        while time.time() < deadline:
+            try:
+                last = self._eval_json(_LOGIN_BUTTON_JS)
+            except Exception as e:  # transient page work
+                last = {"ok": False, "error": f"button probe failed: {e}"}
+            if last.get("ok"):
+                return last
+            time.sleep(0.4)
+        return last
+
+    def fill_login(self) -> dict:
+        """Log in with the configured credentials. Deterministic, no model.
+
+        The credentials come from the environment, so they never enter a
+        model's context, a prompt, or a log. The flow is exactly what the
+        operator does by hand:
+
+          1. dismiss a leftover dialog (it covers the panel and eats the
+             real click),
+          2. fill phone + password,
+          3. wait for Login to enable,
+          4. real-click it (the site ignores synthetic clicks),
+          5. wait for the session to actually come back.
+
+        Every failure says what the page looked like, because 'no visible
+        login button' four cycles in a row is not a diagnosis.
         """
         phone = os.environ.get("ATLAS_SPORTYBET_PHONE", "")
         password = os.environ.get("ATLAS_SPORTYBET_PASSWORD", "")
@@ -180,23 +249,110 @@ class BrowserTools:
                 "error": "no credentials configured "
                 "(ATLAS_SPORTYBET_PHONE / ATLAS_SPORTYBET_PASSWORD)",
             }
-        from atlas.browser.webbridge import WebBridgeAdapter
-
         adapter = self.capture.adapter
-        code = _LOGIN_JS.replace("__PHONE__", json.dumps(phone)).replace(
-            "__PASSWORD__", json.dumps(password)
-        )
+        steps: list = []
+
+        # 1. An 'Odds not acceptable, please try again' dialog sits on top of
+        #    the login panel; a real click at the Login button's coordinates
+        #    lands on the overlay instead.
         try:
-            raw = adapter.evaluate(code)
+            dismiss = self._eval_json(_LOGIN_DISMISS_JS)
         except Exception as e:
-            return {"ok": False, "error": str(e)}
-        data = raw.get("data", raw) if isinstance(raw, dict) else raw
-        if isinstance(data, dict) and "value" in data:
+            return {"ok": False, "error": f"could not inspect the page: {e}"}
+        if dismiss.get("selector"):
             try:
-                return json.loads(data["value"])
-            except json.JSONDecodeError:
-                return {"ok": False, "error": "login returned nothing"}
-        return data if isinstance(data, dict) else {"ok": False}
+                adapter.click(dismiss["selector"])
+                steps.append(f"dismissed dialog: {dismiss.get('text', '')[:60]}")
+                time.sleep(0.4)
+            except Exception as e:
+                steps.append(f"dialog click failed: {e}")
+
+        # 2./3. Fill, then wait for the button. The phone shape is retried
+        # because the prefix rule is the book's, not ours.
+        selector = None
+        last: dict = {"ok": False, "error": "login not attempted"}
+        for candidate in self._phone_candidates(phone):
+            code = _LOGIN_JS.replace("__PHONE__", json.dumps(candidate)).replace(
+                "__PASSWORD__", json.dumps(password)
+            )
+            try:
+                filled = self._eval_json(code)
+            except Exception as e:
+                return {"ok": False, "error": f"login fill failed: {e}", "steps": steps}
+            if not filled.get("ok"):
+                last = filled
+                continue
+            button = self._wait_login_button(adapter, timeout=6.0)
+            if button.get("ok"):
+                selector = button.get("selector")
+                steps.append(
+                    f"filled {filled.get('phone_field')} ({len(candidate)} digits)"
+                )
+                break
+            last = {
+                "ok": False,
+                "error": button.get("error") or "login button stayed disabled",
+                "hint": button.get("hint"),
+                "button_class": button.get("cls"),
+                "phone_field": filled.get("phone_field"),
+            }
+            steps.append(
+                f"phone of {len(candidate)} digits refused: "
+                f"{last.get('hint') or last.get('error')}"
+            )
+        if not selector:
+            return {**last, "ok": False, "steps": steps}
+
+        # 4. The submit needs a REAL browser click.
+        start = time.time()
+        try:
+            adapter.click(selector)
+        except Exception as e:
+            return {"ok": False, "error": f"login click failed: {e}", "steps": steps}
+        steps.append("clicked Login")
+
+        # 5. The form stays in the DOM after a successful login (it is only
+        #    hidden), so wait for the session check to stop seeing it. The
+        #    SPA swaps the header for 'My Account' asynchronously and this
+        #    build took longer than the old 20s window — the click HAD
+        #    worked, the confirmation gave up first (2026-10-30).
+        deadline = time.time() + 45.0
+        while time.time() < deadline:
+            time.sleep(1.5)
+            try:
+                session = self.capture.session_expired()
+            except Exception:
+                continue
+            if session.get("hasAccount") and not session.get("visiblePassword"):
+                steps.append(f"session restored in {time.time() - start:.0f}s")
+                return {"ok": True, "steps": steps}
+            if not session.get("expired") and not session.get("probe_failed"):
+                steps.append(f"session restored in {time.time() - start:.0f}s")
+                return {"ok": True, "steps": steps}
+
+        # Not logged in. Say WHY: an OTP needs a human, a rejection does not.
+        try:
+            state = self._eval_json(_LOGIN_STATE_JS)
+        except Exception:
+            state = {}
+        if state.get("otp"):
+            return {
+                "ok": False,
+                "error": "the book is asking for a verification code (OTP) — "
+                "a human has to enter it",
+                "steps": steps,
+            }
+        if state.get("message"):
+            return {
+                "ok": False,
+                "error": f"login rejected: {state['message']}",
+                "steps": steps,
+            }
+        return {
+            "ok": False,
+            "error": "login did not take (the login form is still showing)",
+            "steps": steps,
+        }
 
     def navigate(self, url: str) -> dict:
         """Navigate client-side (never a direct live-board navigation)."""
@@ -286,11 +442,32 @@ class BrowserTools:
         return {"ok": True, "image": b64}
 
 
-_LOGIN_JS = """
+# The login form is a modal built from the SAME components as the betslip
+# (.m-input, .af-button--primary), and it sits UNDER any leftover dialog
+# ("Odds not acceptable, please try again"). Three things broke the old
+# payload, all found against the live page on 2026-10-30:
+#
+#   1. The Login button was searched inside `pwd.closest('form') ||
+#      pwd.parentElement`. The password's parent is `.m-input-wrapper`
+#      (310x54) and the button lives in `.m-btn-wrap` three levels up, so
+#      the search never reached it -> "no visible login button", every cycle.
+#   2. The phone field is `input[name=phone]` (type text, "Mobile Number"),
+#      NOT `input[type=tel]`, so the phone was never filled.
+#   3. The button is `is-disabled` until React has accepted BOTH fields; the
+#      enabled state arrives a tick after the events, so it has to be polled.
+#
+# The payload therefore scopes by the LOGIN PANEL (not by a parent element),
+# fills by name/placeholder, and only MARKS the button: the submit still
+# needs a real browser click (the site ignores untrusted events).
+_LOGIN_JS = r"""
 (() => {
-  const visible = (e) => e && e.offsetParent !== null &&
-    getComputedStyle(e).display !== 'none' &&
-    getComputedStyle(e).visibility !== 'hidden';
+  const vis = (e) => {
+    if (!e) return false;
+    const r = e.getBoundingClientRect();
+    if (!r || r.width <= 0 || r.height <= 0) return false;
+    const cs = window.getComputedStyle(e);
+    return cs.display !== 'none' && cs.visibility !== 'hidden';
+  };
   const setNative = (el, value) => {
     const proto = el instanceof HTMLTextAreaElement
       ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
@@ -298,25 +475,144 @@ _LOGIN_JS = """
     setter.call(el, value);
     el.dispatchEvent(new Event('input', { bubbles: true }));
     el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
   };
-  const pw = Array.from(document.querySelectorAll('input[type=password]')).filter(visible);
-  if (!pw.length) return JSON.stringify({ok: false, error: 'no visible password field'});
-  const pwd = pw[0];
-  const form = pwd.closest('form') || pwd.parentElement;
-  let tel = null;
-  for (const c of Array.from(document.querySelectorAll("input[type=tel], input[inputmode=numeric]")).filter(visible)) {
-    if (!form || form.contains(c)) { tel = c; break; }
+  // Scope: the login panel. Its password field is the anchor, so walk up to
+  // the panel that OWNS the button instead of stopping at the input wrapper.
+  const pwAll = Array.from(document.querySelectorAll('input[type=password]')).filter(vis);
+  if (!pwAll.length) return JSON.stringify({ok: false, error: 'no visible password field'});
+  const pwd = pwAll[0];
+  let scope = pwd.closest('.m-page--login, [role=dialog], .m-pop-dialog__wrapper, .es-dialog');
+  if (!scope) {
+    scope = pwd;
+    for (let i = 0; i < 8 && scope.parentElement; i++) scope = scope.parentElement;
   }
-  if (tel) setNative(tel, __PHONE__);
+  // Phone: by name/placeholder first (the live field is input[name=phone]
+  // with placeholder 'Mobile Number'), then type=tel, then the visible text
+  // input that precedes the password in DOM order.
+  const inputs = Array.from(scope.querySelectorAll('input')).filter(vis);
+  const textish = (i) => {
+    const t = (i.type || 'text').toLowerCase();
+    return t !== 'password' && t !== 'checkbox' && t !== 'radio' && t !== 'submit';
+  };
+  // The book renders the SAME login twice: an inline form in the header
+  // (input[name=phone] + input[name=psd]) and a modal (.m-page--login).
+  // Both name the phone field `phone`, and the header also carries an
+  // unrelated 'Mobile Number' box from Instant Registration, so the name
+  // is the only reliable discriminator.
+  let tel = Array.from(document.querySelectorAll('input[name=phone]'))
+    .filter(vis).filter(textish)[0] || null;
+  if (!tel) tel = inputs.filter(textish).find(
+    (i) => /phone|mobile/i.test((i.name || '') + ' ' + (i.placeholder || ''))
+  );
+  if (!tel) tel = inputs.filter(textish).find((i) => (i.type || '').toLowerCase() === 'tel');
+  if (!tel) {
+    const all = Array.from(document.querySelectorAll('input')).filter(vis);
+    const idx = all.indexOf(pwd);
+    if (idx > 0 && textish(all[idx - 1])) tel = all[idx - 1];
+  }
+  if (!tel) return JSON.stringify({ok: false, error: 'no phone field on the login form'});
+  // Replace, never append: a stale value (the betslip once typed '10.00'
+  // into this field) would otherwise survive and keep the button disabled.
+  setNative(tel, __PHONE__);
   setNative(pwd, __PASSWORD__);
-  let btn = null;
-  for (const b of (form || document).querySelectorAll('button, [role=button], input[type=submit]')) {
-    const label = ((b.innerText || b.value || '') + ' ' + (b.getAttribute('aria-label') || '')).trim();
-    if (/^login$/i.test(label) && visible(b)) { btn = b; break; }
+  return JSON.stringify({
+    ok: true,
+    phone_field: (tel.name || tel.placeholder || ''),
+    phone_value: tel.value,
+    scope: String(scope.className || '').slice(0, 60)
+  });
+})()
+"""
+
+# The Login button turns enabled a tick after the fields are accepted, so it
+# is polled. `is-disabled` is the class the live build toggles alongside the
+# `disabled` property; both are checked.
+_LOGIN_BUTTON_JS = r"""
+(() => {
+  const vis = (e) => {
+    if (!e) return false;
+    const r = e.getBoundingClientRect();
+    if (!r || r.width <= 0 || r.height <= 0) return false;
+    const cs = window.getComputedStyle(e);
+    return cs.display !== 'none' && cs.visibility !== 'hidden';
+  };
+  const label = (b) => ((b.innerText || b.value || '').trim());
+  const isLogin = (b) => /^login$/i.test(label(b));
+  const all = Array.from(
+    document.querySelectorAll('button, [role=button], input[type=submit]')
+  ).filter(vis).filter(isLogin);
+  if (!all.length) {
+    return JSON.stringify({ok: false, error: 'no login button on the page'});
   }
-  if (!btn) return JSON.stringify({ok: false, error: 'no visible login button'});
-  btn.click();
-  return JSON.stringify({ok: true});
+  const btn = all.find(
+    (b) => !b.disabled && !/(^|\s)is-disabled(\s|$)/.test(String(b.className || ''))
+  );
+  if (!btn) {
+    const msg = (document.body.innerText || '')
+      .match(/please enter a valid[^\n]*|incorrect[^\n]*|invalid[^\n]*/i);
+    return JSON.stringify({
+      ok: false,
+      error: 'login button stayed disabled',
+      hint: msg ? msg[0].trim() : null,
+      disabled: all[0].disabled,
+      cls: String(all[0].className || '')
+    });
+  }
+  btn.setAttribute('data-atlas-login-btn', '1');
+  return JSON.stringify({ok: true, selector: '[data-atlas-login-btn="1"]'});
+})()
+"""
+
+# A leftover dialog ("Odds not acceptable, please try again") sits ON TOP of
+# the login panel; a real click on Login lands on the overlay instead. Only
+# dialogs WITHOUT a password field are dismissed, so the login panel itself
+# can never be closed by this payload.
+_LOGIN_DISMISS_JS = r"""
+(() => {
+  const vis = (e) => {
+    if (!e) return false;
+    const r = e.getBoundingClientRect();
+    if (!r || r.width <= 0 || r.height <= 0) return false;
+    const cs = window.getComputedStyle(e);
+    return cs.display !== 'none' && cs.visibility !== 'hidden';
+  };
+  const dlgs = Array.from(document.querySelectorAll(
+    '.es-dialog, .m-dialog, [role=dialog], .m-pop-dialog__wrapper'
+  )).filter(vis);
+  for (const d of dlgs) {
+    if (d.querySelector('input[type=password]')) continue;
+    if (d.querySelector('input[name=phone]')) continue;
+    const btn = Array.from(d.querySelectorAll('button, [role=button]'))
+      .find((b) => vis(b) && /^(ok|close|got it|confirm|dismiss)$/i.test((b.innerText || '').trim())
+                   && !b.disabled);
+    if (!btn) continue;
+    btn.setAttribute('data-atlas-dismiss', '1');
+    return JSON.stringify({
+      ok: true,
+      selector: '[data-atlas-dismiss="1"]',
+      text: (d.innerText || '').trim().slice(0, 80)
+    });
+  }
+  return JSON.stringify({ok: true, selector: null});
+})()
+"""
+
+# Why did the click not take? A wrong password leaves an inline message; a
+# new-device check leaves an OTP box. Those need different answers: one is a
+# credentials problem, the other is a human problem.
+_LOGIN_STATE_JS = r"""
+(() => {
+  const t = document.body.innerText || '';
+  const msg = (t.match(/incorrect[^\n]*|invalid[^\n]*|not match[^\n]*|verification code[^\n]*/i) || [])[0];
+  const otpField = Array.from(document.querySelectorAll(
+    'input[name*=code], input[name*=otp], input[autocomplete=one-time-code]'
+  )).some((i) => i.getBoundingClientRect().width > 0);
+  const otp = otpField || /verification code|one-time code|enter the code/i.test(t);
+  return JSON.stringify({
+    otp: otp,
+    message: msg ? msg.trim().slice(0, 140) : null
+  });
 })()
 """
 
@@ -427,6 +723,10 @@ class Supervisor:
         self.audit_path = (
             Path(audit_path) if audit_path else Path("data/decisions/supervisor.jsonl")
         )
+        # Auto-login backoff: consecutive failures and the time before the
+        # next attempt. A rejected password must not be retried every cycle.
+        self._login_failures = 0
+        self._login_block_until = 0.0
 
     # --- audit -----------------------------------------------------------
 
@@ -448,20 +748,43 @@ class Supervisor:
         need a language model. The credentials come from the environment and
         never enter a prompt.
         """
+        # Back off after a failed login: retrying a rejected password every
+        # 30s is how an account gets locked, and a page that needs an OTP
+        # will never be fixed by trying harder.
+        if time.time() < self._login_block_until:
+            return SupervisorResult(
+                handled=False,
+                reason="auto-login is backing off after a failure "
+                f"({int(self._login_block_until - time.time())}s left)",
+            )
         result = self.tools.fill_login()
         action = SupervisorAction(
             at=_now(), tool="fill_login", args={}, result=result, ok=bool(result.get("ok"))
         )
         self._audit(action)
         if not result.get("ok"):
+            self._login_failures += 1
+            delay = min(600.0, 15.0 * (2 ** min(self._login_failures - 1, 5)))
+            self._login_block_until = time.time() + delay
+            # The operator has to hear this: an auto-login that cannot work
+            # leaves the loop alive but unable to bet, which looks exactly
+            # like "no opportunities".
+            if self.notifier is not None:
+                self.notifier.critical(
+                    "Automatic login failed",
+                    f"{result.get('error')} — retrying in {int(delay)}s "
+                    f"(attempt {self._login_failures})",
+                )
             return SupervisorResult(
                 handled=False,
                 reason=f"login failed: {result.get('error')}",
                 actions=[action],
             )
-        # Confirm it worked.
-        for _ in range(10):
-            time.sleep(1.0)
+        self._login_failures = 0
+        self._login_block_until = 0.0
+        # Confirm it worked. fill_login already waited for the header to
+        # swap; this is the second opinion on a fresh probe.
+        for _ in range(6):
             session = self.capture.session_expired()
             if not session.get("expired"):
                 return SupervisorResult(
@@ -470,6 +793,7 @@ class Supervisor:
                     actions=[action],
                     message="Session expired; re-logged in automatically.",
                 )
+            time.sleep(1.0)
         return SupervisorResult(
             handled=False,
             reason="login submitted but the session still shows as expired",
@@ -634,7 +958,36 @@ class Supervisor:
 
         The known cases are handled deterministically; the LLM is the
         fallback for the ones nobody has seen.
+
+        Nothing raised in here may escape: the supervisor is the LAST line
+        of defence, so a dead model endpoint (a 404 from OpenRouter) or a
+        wedged tab must degrade to "not handled" and let the next cycle
+        retry. It used to propagate, and an unhandled HTTPStatusError took
+        the whole trading loop down with it (2026-10-29).
         """
+        try:
+            return self._handle(result, task)
+        except Exception as e:  # noqa: BLE001 — see the docstring
+            # Degrading to "not handled" keeps the loop alive, but a silent
+            # degradation is how a broken supervisor goes unnoticed for a
+            # day. Write it down.
+            self._audit(
+                SupervisorAction(
+                    at=_now(),
+                    tool="error",
+                    args={"reason": (result.reason or "")[:200]},
+                    result={"error": f"{type(e).__name__}: {e}"},
+                    ok=False,
+                )
+            )
+            return SupervisorResult(
+                handled=False,
+                reason=f"supervisor error: {type(e).__name__}: {e}",
+            )
+
+    def _handle(
+        self, result: CaptureResult, task: Optional[str] = None
+    ) -> SupervisorResult:
         reason = result.reason or ""
         if "session expired" in reason:
             outcome = self.handle_session_expired()

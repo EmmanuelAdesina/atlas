@@ -517,8 +517,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         allow_submission=args.submit,
         state_path=args.state,
         decision_log_path=args.decision_log,
+        operator_min_stake=args.min_stake,
+        operator_max_stake=args.max_stake,
     )
     runner.load_state()
+    # Persist the effective startup posture so the dashboard's /status and
+    # any supervising process see exactly what this loop is running with.
+    runner.save_state()
     console.print(
         f"[bold]Atlas live loop[/bold] | session {args.session} | "
         f"ledger {args.ledger} | submission "
@@ -531,7 +536,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         console.print(
             f"[cyan]Control dashboard on http://{args.host}:{args.port}[/cyan]"
         )
-        serve(runner, host=args.host, port=args.port, notifier=notifier)
+        # The dashboard process is an OBSERVER: the trading loop owns the
+        # browser tab, and a cycle in this process would navigate it behind
+        # the loop's back (process-local page locks cannot see it). Manual
+        # cycles are refused; POST /posture steering stays available.
+        serve(
+            runner,
+            host=args.host,
+            port=args.port,
+            notifier=notifier,
+            manual_cycles=False,
+        )
         return 0
     if not args.submit:
         console.print(
@@ -542,6 +557,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         runner.run_forever(max_cycles=args.cycles)
     except KeyboardInterrupt:
         console.print("[yellow]loop interrupted[/yellow]")
+    finally:
+        # Let an in-flight placement land and record before the process
+        # exits; a submitted ticket the ledger never sees is a phantom
+        # position with real money on it.
+        runner.shutdown(timeout=30.0)
     for report in runner.reports[-10:]:
         console.print(report.describe())
     return 0
@@ -668,7 +688,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     # Sure-thing scan: a covering set whose inverse prices sum below one is a
     # guaranteed profit, independent of how the match ends.
-    from atlas.live.arb import Selection, best_arbs
+    from atlas.live.arb import Selection, best_arbs, normalized_identity_set
 
     arb_selections = [
         Selection(
@@ -719,25 +739,19 @@ def cmd_plan(args: argparse.Namespace) -> int:
     accepted = [d for d in decisions if d.should_bet and not stop_active]
 
     if posture.require_guaranteed_profit:
-        # Superedge-only: only legs of a sure-thing covering set may be staked.
-        arb_legs = {
-            (d.opportunity.market_key, d.opportunity.selection)
-            for arb in arbs
-            for d in decisions
-            if d.opportunity.market_key == arb.family
-        }
-        arb_names = {
-            (d.opportunity.market_key, d.opportunity.selection)
-            for arb in arbs
-            for name, _ in arb.legs
-            for d in decisions
-            if d.opportunity.selection == name
-        }
-        allowed = arb_legs | arb_names
+        # Superedge-only: only the actual legs of a sure-thing covering set
+        # may be staked. A leg is (market_key, selection) — matching on the
+        # selection text alone let "No" from btts, clean sheet and win-to-nil
+        # all pass as if they were the arb leg.
+        allowed = normalized_identity_set(arbs)
         before = len(accepted)
         accepted = [
             d for d in accepted
-            if (d.opportunity.market_key, d.opportunity.selection) in allowed
+            if (
+                d.opportunity.market_key.strip().lower(),
+                d.opportunity.selection.strip().lower(),
+            )
+            in allowed
         ]
         if before != len(accepted):
             console.print(

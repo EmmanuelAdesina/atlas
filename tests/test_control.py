@@ -126,3 +126,23 @@ def test_cycle_endpoint_runs_one_cycle(client):
     assert r.status_code == 200
     assert r.json()["ready"] is True
     assert client.runner.cycle == 1
+
+
+def test_dashboard_only_process_cannot_trigger_cycles(tmp_path):
+    """Two processes share one SportyBet tab: the loop (money path, page
+    owner) and the dashboard. A cycle in the dashboard process would
+    navigate the board behind the loop's back — page locks are
+    process-local. A dashboard-only server must refuse /cycle and say why;
+    posture steering stays available (2026-10-28)."""
+    from atlas.live.control import build_app
+
+    ledger = BetLedger(LedgerConfig(), log_path=tmp_path / "l.jsonl")
+    runner = LiveRunner(capture=FakeCapture(), ledger=ledger)
+    with TestClient(build_app(runner, None, manual_cycles=False)) as c:
+        r = c.post("/cycle")
+        assert r.status_code == 409
+        assert "observer" in r.json()["detail"]
+        assert runner.cycle == 0, "no cycle may run in the observer process"
+        # steering is NOT lost:
+        p = c.post("/posture", json={"instruction": "low risk"})
+        assert p.status_code == 200

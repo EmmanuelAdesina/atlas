@@ -487,3 +487,21 @@ def test_single_view_period_labels_are_understood():
     chosen = LiveRunner.choose_match(candidates)
     assert chosen is not None
     assert chosen.period == "2nd Half"
+
+
+def test_a_scheduled_match_is_never_chosen():
+    """A pre-match row can carry more markets than a live one; opening it
+    would trade live pricing for a pre-match panel."""
+    from atlas.live.capture import BoardCandidate
+    from atlas.live.runner import LiveRunner
+
+    scheduled = BoardCandidate(
+        match_id="s0", home_team="A", away_team="B", score="",
+        minute=14.5, period="14:30", num_markets=40, index=0, live=False,
+    )
+    live = BoardCandidate(
+        match_id="c1", home_team="C", away_team="D", score="1-0",
+        minute=60.0, period="H2", num_markets=10, index=1, live=True,
+    )
+    assert LiveRunner.choose_match([scheduled, live]) is live
+    assert LiveRunner.choose_match([scheduled]) is None

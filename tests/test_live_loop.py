@@ -201,3 +201,150 @@ def test_webbridge_raises_on_daemon_error():
         200, json={"ok": False, "error": {"code": "extension_error", "message": "nope"}}))
     with pytest.raises(WebBridgeError, match="extension_error"):
         WebBridgeAdapter(session="t", client=client).snapshot()
+
+
+# --- WebBridge transient-failure policy (2026-10-29) ----------------------
+# A wedged extension answers 502 until it recovers. One 502 used to abort a
+# cycle and surface as "the board is empty"; reads retry bounded, money-path
+# clicks never do (an ambiguous click can place a second bet).
+
+def test_webbridge_retries_a_transient_502_and_recovers():
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(502, text="bad gateway")
+        return httpx.Response(200, json={"ok": True, "data": {"tree": []}})
+
+    adapter = WebBridgeAdapter(
+        session="t", client=_mock_client(handler), retry_backoff_s=0.0
+    )
+    assert adapter.snapshot() == {"tree": []}
+    assert calls["n"] == 3
+
+
+def test_webbridge_gives_up_after_bounded_transient_retries():
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        return httpx.Response(503, text="unavailable")
+
+    adapter = WebBridgeAdapter(
+        session="t", client=_mock_client(handler), retry_backoff_s=0.0
+    )
+    with pytest.raises(WebBridgeError) as ei:
+        adapter.snapshot()
+    assert ei.value.transient is True
+    assert calls["n"] == 3, "bounded: attempts=3"
+
+
+def test_webbridge_never_retries_a_click():
+    """A timed-out click may already have happened: retrying can double it."""
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        raise httpx.ConnectError("daemon down")
+
+    adapter = WebBridgeAdapter(
+        session="t",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        retry_backoff_s=0.0,
+    )
+    with pytest.raises(WebBridgeError):
+        adapter.click('[data-atlas-place-bet="1"]')
+    assert calls["n"] == 1
+
+
+def test_webbridge_does_not_retry_an_application_error():
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        return httpx.Response(
+            200, json={"ok": False, "error": {"code": "no_tab", "message": "x"}}
+        )
+
+    adapter = WebBridgeAdapter(
+        session="t", client=_mock_client(handler), retry_backoff_s=0.0
+    )
+    with pytest.raises(WebBridgeError) as ei:
+        adapter.snapshot()
+    assert ei.value.transient is False
+    assert calls["n"] == 1
+
+
+def test_evaluate_safe_falls_back_to_cdp_when_the_extension_hangs():
+    """The renderer dies to chrome-error on the heavy list; CDP still runs."""
+    def handler(req):
+        body = json.loads(req.content)
+        if body["action"] == "evaluate":
+            return httpx.Response(502, text="bad gateway")
+        if body["action"] == "cdp":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "data": {
+                        "result": {
+                            "result": {"type": "string", "value": "cdp-ok"}
+                        }
+                    },
+                },
+            )
+        return httpx.Response(404)
+
+    adapter = WebBridgeAdapter(
+        session="t", client=_mock_client(handler), retry_backoff_s=0.0
+    )
+    out = adapter.evaluate_safe("location.href")
+    assert out["value"] == "cdp-ok"
+
+
+def test_evaluate_safe_does_not_replay_an_application_error():
+    """ok:false is a deterministic answer, not a transport fault."""
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        return httpx.Response(
+            200, json={"ok": False, "error": {"code": "no_tab", "message": "x"}}
+        )
+
+    adapter = WebBridgeAdapter(
+        session="t", client=_mock_client(handler), retry_backoff_s=0.0
+    )
+    with pytest.raises(WebBridgeError):
+        adapter.evaluate_safe("1")
+    assert calls["n"] == 1
+
+
+def test_read_actions_use_the_short_timeout_navigate_keeps_the_long_one():
+    """A wedged page answers reads never; waiting 45s for each read (+45s
+    for the CDP fallback) is how cycles stretched past five minutes
+    (2026-10-31). Reads get 15s; money-path actions keep the default."""
+    seen = {}
+
+    def handler(request: httpx.Request):
+        seen["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(
+            200, json={"ok": True, "data": {"type": "number", "value": 1}}
+        )
+
+    adapter = WebBridgeAdapter(
+        session="t", client=_mock_client(handler), retry_backoff_s=0.0
+    )
+    adapter.evaluate("1 + 1")
+    assert seen["timeout"]["read"] == 15.0, (
+        "evaluate must fail fast on a wedged page"
+    )
+    adapter.navigate("https://example.com")
+    assert seen["timeout"]["read"] == 45.0, (
+        "cold navigation must keep the generous default"
+    )
+    adapter.click("sel")
+    assert seen["timeout"]["read"] == 45.0, (
+        "the money path must keep the generous default"
+    )

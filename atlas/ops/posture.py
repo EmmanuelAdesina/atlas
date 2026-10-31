@@ -51,7 +51,10 @@ HARD_BOUNDS = {
     "kelly_fraction": (0.01, 0.25),
     "max_exposure_per_match": (500.0, 20_000.0),
     "max_bets_per_snapshot": (1, 10),
-    "max_stake_per_bet": (100.0, 10_000.0),
+    # 10.0 floor: the operator runs an NGN 10/flat regime (min == max ==
+    # 10). A 100 floor here re-clamped the operator cap back to 100 every
+    # cycle — the silent stake inflation of 2026-10-28.
+    "max_stake_per_bet": (10.0, 10_000.0),
     # How much BETTER than the model value a cashout offer must be before it
     # is taken. Negative means a risk-seeking posture accepts a discounted
     # floor; positive means it demands a premium to sell.
@@ -74,7 +77,12 @@ _MODE_PRESETS: dict[PostureMode, dict[str, float]] = {
         "min_ev": 0.05,
         "kelly_fraction": 0.10,
         "max_exposure_per_match": 3_000.0,
-        "max_bets_per_snapshot": 2,
+        # 4: the snapshot cap at 2 accepted then wasted most of them in
+        # placement (427 'max bets per snapshot' refusals in one afternoon
+        # with only 2 landing slots). At the NGN 10 flat regime, 4 slots
+        # = NGN 40 worst-case per snapshot — still well inside the
+        # streaky-loss bounds (daily stop −500).
+        "max_bets_per_snapshot": 4,
         "max_stake_per_bet": 1_000.0,
         "cashout_min_discount": 0.0,
     },

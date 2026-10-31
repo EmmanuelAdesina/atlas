@@ -52,8 +52,12 @@ class BetRecord:
 class LedgerConfig:
     currency: str = "NGN"
     daily_loss_limit: float = -500.0
-    min_stake: float = 100.0
-    max_stake: float = 1000.0
+    # SportyBet NG's own book floor is NGN 10; a 100 default here silently
+    # rejected every legit sub-100 stake from entering the book of record
+    # (2026-10-28: this rejected the reconciliation entry for the NGN 35
+    # PFC Nasaf win that the placement gate had mis-recorded as unconfirmed).
+    min_stake: float = 10.0
+    max_stake: float = 10_000.0
 
 
 class BetLedger:
@@ -80,6 +84,17 @@ class BetLedger:
                 entry = json.loads(line)
                 rec = BetRecord.from_dict(entry["record"])
                 self._bets[rec.bet_id] = rec
+
+    def refresh(self) -> None:
+        """Re-read the ledger file from disk.
+
+        For processes that only OBSERVE a ledger another process writes
+        (the control dashboard). Read-only: it never appends or mutates
+        bets, and the file is append-only JSONL, so re-reading is safe.
+        """
+        with self._lock:
+            self._bets = {}
+            self._load()
 
     def _append(self, record: BetRecord, event: str) -> None:
         entry = {

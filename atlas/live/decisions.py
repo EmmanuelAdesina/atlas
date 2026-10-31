@@ -49,6 +49,11 @@ class PolicyConfig:
     kill_switch: bool = False
     blocked_matches: set[str] = field(default_factory=set)
     blocked_markets: set[str] = field(default_factory=set)
+    # Long-odds gate: at high decimal odds the model's probability error
+    # dominates the claimed edge (a 1% miss at odds 10 is the whole bet).
+    # The NGN 100 loss on 2026-10-28 (Over 1.5 @ 10.0) is the case study.
+    # Raise only when the calibration record proves itself at length.
+    max_bet_odds: float = 3.0
     allow_execution: bool = False  # V1: observe + log only. No bet placement.
 
 
@@ -72,6 +77,27 @@ def compute_recommended_stake_ngn(
     raw_ngn = math.floor(policy.bankroll_ngn * f_star + 1e-9)
     remaining_exp = max(0.0, policy.max_exposure_per_match - current_match_exposure)
     max_by_payout = policy.max_payout_per_bet / max(1.0, odds)
+
+    # FLAT SIZING MODE (operator decision 2026-10-28): when min == max (the
+    # NGN 10 floor == the NGN 10 cap), the stake is the operator's flat
+    # stake whenever the conservative Kelly edge is positive. Proportional
+    # Kelly on a 50-NGN balance computes 1-4 NGN stakes — mathematically
+    # honest ('no edge justifies 19% of bankroll') but it refuted 1,133
+    # recommendations in one afternoon while the operator explicitly set
+    # NGN 10 both as floor AND cap: min==max IS the flat regime. Risk
+    # control stays in the pass gates (EV floor, odds cap, exposure caps);
+    # balance-proportional sizing resumes the moment max > min.
+    if (
+        abs(policy.min_stake_ngn - policy.max_stake_per_bet) < 1e-9
+        and raw_ngn > 0
+    ):
+        flat = min(
+            float(policy.min_stake_ngn), remaining_exp, max_by_payout
+        )
+        if flat >= policy.min_stake_ngn:
+            return float(math.floor(flat))
+        return 0.0
+
     capped = min(
         float(raw_ngn),
         policy.max_stake_per_bet,
