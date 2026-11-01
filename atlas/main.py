@@ -453,6 +453,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     from atlas.browser.betslip import BetslipDriver
     from atlas.browser.cashout import CashoutDriver
     from atlas.browser.webbridge import DEFAULT_DAEMON_URL, WebBridgeAdapter
+    from atlas.live.control import serve
     from atlas.live.decisions import PolicyConfig
     from atlas.live.supervisor import LLMClient, Supervisor
     from atlas.live.capture import LiveCapture
@@ -462,9 +463,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     from atlas.ops.posture import DEFAULT_POSTURE, posture_for_mode, propose_posture
     from atlas.ops.telemetry import init_telemetry
 
-    # Telemetry is the ONLY external surface left now that the dashboard is
-    # gone: outbound OTLP push, zero listening sockets. Unconfigured, it is
-    # a no-op and the loop runs exactly as before.
+    # Telemetry pushes outbound OTLP; the dashboard (--dashboard) binds
+    # a local HTTP observer+steer surface. Either can be disabled; neither
+    # places bets — both are read-only observers with posture steering.
     telemetry = init_telemetry(session=args.session)
     if telemetry.endpoint:
         console.print(
@@ -548,6 +549,22 @@ def cmd_run(args: argparse.Namespace) -> int:
         f"[{'ENABLED' if args.submit else 'OFF (observe only)'}]"
     )
     console.print(f"Posture: {runner.posture.describe()}")
+    if args.dashboard:
+        console.print(
+            f"[cyan]Control dashboard on http://{args.host}:{args.port}[/cyan]"
+        )
+        # The dashboard process is an OBSERVER: the trading loop owns the
+        # browser tab, and a cycle in this process would navigate it behind
+        # the loop's back (process-local page locks cannot see it). Manual
+        # cycles are refused; POST /posture steering stays available.
+        serve(
+            runner,
+            host=args.host,
+            port=args.port,
+            notifier=notifier,
+            manual_cycles=False,
+        )
+        return 0
     if not args.submit:
         console.print(
             "[yellow]Submission is OFF. The loop will plan but not place. "
@@ -1037,6 +1054,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--decision-log",
         default="data/decisions/loop_decisions.jsonl",
         help="Where every cycle's decisions are logged",
+    )
+    run.add_argument(
+        "--dashboard", action="store_true", help="Serve the control dashboard instead of looping"
+    )
+    run.add_argument(
+        "--host",
+        default=None,
+        help="Dashboard bind address (default: ATLAS_HOST, else 127.0.0.1)",
+    )
+    run.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Dashboard port (default: ATLAS_PORT, else 8077)",
     )
     run.set_defaults(func=cmd_run)
     return p
