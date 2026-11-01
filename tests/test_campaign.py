@@ -83,6 +83,12 @@ def test_confident_loser_freezes(tmp_path, monkeypatch):
     monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
     # Losing 80% of flat bets: mean per-bet ROI -0.7, sd ~0.8, se ~0.18.
     outcomes = [-10.0, 10.0, -10.0, -10.0, -10.0] * 8  # 40 settled, 8/40 won
+    # Building a settled cohort constructs a settlement RECORD, not live
+    # placement intent — the fail-closed wall must not police the fixture.
+    # Seed the open state, then the verdict is computed from it below.
+    campaign.STATE_FILE.write_text(
+        json.dumps({"action": "proven"}), encoding="utf-8"
+    )
     led = make_ledger_with(tmp_path, outcomes)
     v = verdict(cohort(led))
     assert v["action"] == "observe"
@@ -149,17 +155,31 @@ def test_frozen_is_fail_closed_on_any_non_proven_state(tmp_path, monkeypatch):
     assert campaign.frozen() is False  # the only open state
 
 
-def test_refresh_state_file_below_min_n_returns_collect(tmp_path, monkeypatch):
+def test_refresh_state_file_below_min_n_returns_collect(
+    tmp_path, monkeypatch, real_campaign_scorer
+):
     monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
+    # Open world while building the settlement record; refresh_state_file
+    # then recomputes and overwrites it.
+    campaign.STATE_FILE.write_text(
+        json.dumps({"action": "proven"}), encoding="utf-8"
+    )
     refresh_v = campaign.refresh_state_file(
         make_ledger_with(tmp_path / "led", [-10.0] * 5)
     )
     assert refresh_v["action"] == "collect"
 
 
-def test_refresh_state_file_persists_frozen_verdict(tmp_path, monkeypatch):
+def test_refresh_state_file_persists_frozen_verdict(
+    tmp_path, monkeypatch, real_campaign_scorer
+):
     monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
     monkeypatch.setattr(campaign, "MIN_N", 10)
+    # Open world while building the settlement record; the refreshed
+    # verdict overwrites it and the wall closes.
+    campaign.STATE_FILE.write_text(
+        json.dumps({"action": "proven"}), encoding="utf-8"
+    )
     outcomes = [-10.0, 10.0, -10.0, -10.0, -10.0] * 4
     led = make_ledger_with(tmp_path, outcomes)
     v = campaign.refresh_state_file(led)

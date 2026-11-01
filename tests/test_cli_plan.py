@@ -5,6 +5,7 @@ records accepted bets in the canonical ledger. Nothing is ever submitted.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,14 @@ FIXTURE = Path("tests/fixtures/fortuna_stuttgart_90plus.json")
 
 
 def run_plan(ledger: Path, fixture: Path = FIXTURE, extra: list[str] | None = None):
+    # The child is a separate interpreter: it does not inherit the test
+    # session's campaign world (a monkeypatched STATE_FILE), so point it
+    # at an explicit proven verdict — campaign.py supports
+    # ATLAS_CAMPAIGN_STATE for exactly this. Otherwise the repo's real
+    # collect-state verdict freezes the plan's record step.
+    state = ledger.parent / "campaign_proven.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"action": "proven"}), encoding="utf-8")
     cmd = [
         sys.executable,
         "-m",
@@ -25,7 +34,13 @@ def run_plan(ledger: Path, fixture: Path = FIXTURE, extra: list[str] | None = No
         "--ledger",
         str(ledger),
     ] + (extra or [])
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env={**os.environ, "ATLAS_CAMPAIGN_STATE": str(state)},
+    )
 
 
 def generous_fixture(tmp_path: Path) -> Path:

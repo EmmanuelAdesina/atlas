@@ -36,7 +36,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-STATE_FILE = ROOT / "data" / "ops" / "campaign_state.json"
+# The verdict file is env-overridable (ATLAS_CAMPAIGN_STATE) so a test
+# subprocess, the dashboard process, or a second checkout can point at
+# its own state instead of the repo default.
+STATE_FILE = (
+    Path(os.environ["ATLAS_CAMPAIGN_STATE"])
+    if os.environ.get("ATLAS_CAMPAIGN_STATE")
+    else ROOT / "data" / "ops" / "campaign_state.json"
+)
 DECISIONS = ROOT / "data" / "decisions" / "loop_decisions.jsonl"
 
 MIN_N = int(os.environ.get("ATLAS_CAMPAIGN_MIN_N", "100"))

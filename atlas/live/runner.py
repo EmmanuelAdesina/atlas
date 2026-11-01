@@ -894,10 +894,15 @@ class LiveRunner:
                     cycle=cycle,
                 )
             return 0
-        # Campaign verdict (pre-registered, atlas/ops/campaign.py): the
-        # settled-cohort ROI CI decides on its own whether real money keeps
-        # flowing. The recompute lives here beside the daily stop, so the
-        # verdict is enforced at the LAST wall before money even if the
+        # Campaign verdict (pre-registered, atlas/ops/campaign.py). This is
+        # the PRE-BOOK wall: it must agree with the ledger's gate BEFORE
+        # the slip is touched, because a ledger-side refusal at
+        # record_pending time comes AFTER the book already took the money
+        # (place happens before record — that refusal cannot refund).
+        # FAIL-CLOSED (2026-11-01): only 'proven' proceeds. collect /
+        # watch / observe, a missing verdict, and any scorer failure all
+        # freeze. The recompute lives here beside the daily stop, so the
+        # verdict is enforced at the last wall before money even if the
         # hourly scorer stalls.
         try:
             from atlas.ops.campaign import refresh_state_file
@@ -905,16 +910,21 @@ class LiveRunner:
             verd = refresh_state_file(self.ledger)
         except Exception:
             verd = None
-        if verd is not None and verd.get("action") == "observe":
+        if verd is None or verd.get("action") != "proven":
             if self.notifier is not None and not self._campaign_stop_fired:
                 self._campaign_stop_fired = True
+                action = (
+                    "unavailable (verdict scorer error)"
+                    if verd is None
+                    else str(verd.get("action"))
+                )
                 self.notifier.warn(
-                    "Campaign verdict: OBSERVE — real-money placement frozen",
+                    "Campaign verdict: real-money placement frozen",
                     (
-                        f"{verd.get('why', '')} | cohort n={verd.get('n')} "
-                        f"roi {verd.get('roi_pct')}% "
-                        f"CLV {verd.get('clv_pct')}% | candidates keep "
-                        "being scored, no stakes are submitted"
+                        f"verdict action: {action} | "
+                        f"{str((verd or {}).get('why', ''))[:120]} | "
+                        "fail-closed: only 'proven' places; candidates "
+                        "keep being scored, no stakes are submitted"
                     ),
                     cycle=cycle,
                 )
