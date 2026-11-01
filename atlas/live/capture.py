@@ -203,9 +203,14 @@ class LiveCapture:
     MATCH_MARKERS = ("/sr:match:", "/football/live/")
 
     def current_url(self) -> str:
-        """The tab's REAL URL, cached for the heartbeat and the nav checks."""
+        """The tab's REAL URL, cached for the heartbeat and the nav checks.
+
+        retries=0: a single 15s attempt. current_url is called at the start
+        of every capture cycle; retrying on a slow daemon just queues more
+        commands behind the timed-out one.
+        """
         try:
-            href = self._evaluate("location.href")
+            href = self._evaluate("location.href", retries=0)
         except CaptureError:
             return ""
         if isinstance(href, str) and href:
@@ -424,7 +429,7 @@ class LiveCapture:
         # tab used to look exactly like a healthy session (2026-10-30).
         self.session_probe_failed = False
         try:
-            raw = self._evaluate(self.JS_SESSION)
+            raw = self._evaluate(self.JS_SESSION, retries=0)
         except CaptureError as e:
             self.session_probe_failed = True
             return {"expired": False, "probe_failed": True, "error": str(e)}
@@ -858,11 +863,15 @@ class LiveCapture:
         case the capture loop falls back to the single readers this
         batched read replaces. The bundle is a SPEED path, never a
         behavior change.
+
+        retries=0: a single 15s attempt. Retrying on a slow daemon just
+        queues more commands behind the timed-out one (the 2026-10-29
+        queue pile-up), burning the cycle's budget for no benefit.
         """
         import json
 
         try:
-            raw = self._evaluate(self._bundle_js())
+            raw = self._evaluate(self._bundle_js(), retries=0)
         except CaptureError:
             return {}
         if isinstance(raw, str):
