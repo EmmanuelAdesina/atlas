@@ -1,203 +1,447 @@
-"""Post-match calibration, Brier / Log-Loss scoring, and edge attribution (§8).
+"""Per-market-family calibration maps for model probability calibration.
 
-Evaluates recorded DecisionRecords against verified settled outcomes:
-  - Probability calibration (Brier score, log-loss, mean predicted vs realized win rate),
-  - Realized returns on recommended/executed stakes vs paper counterfactuals,
-  - Performance breakdown by market family and confidence grade,
-  - Whether apparent EV survived model uncertainty (EV vs EV_lower vs realized return).
+Raw model_p from LiveStateSpaceModel is not trustworthy — Perth post-mortem
+showed the model overestimates in losing families (ou claimed +8.9 -> -38.3
+realized). This module learns a monotonic calibration map per market family:
+
+    calibrated_p = isotonic_regression(model_p) -> actual_win_rate
+
+Uses the Pool Adjacent Violators Algorithm (PAVA) — pure Python, no scipy
+dependency. Calibration maps are persisted to data/ops/calibration_maps.json
+and loaded at runtime.
+
+Usage:
+    from atlas.live.calibration import CalibrationMap
+    cal = CalibrationMap.load()           # loads from disk
+    p_cal = cal.calibrate("ou_3_5", 0.88) # raw 0.88 -> calibrated ~0.55
+    cal.fit(family_records)               # retrain from settled history
+    cal.save()                            # persist to disk
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
+from bisect import bisect_right
+from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[2]
+CALIBRATION_MAP_PATH = ROOT / "data" / "ops" / "calibration_maps.json"
 
-@dataclass(frozen=True)
-class GradedDecision:
-    match_id: str
-    market_key: str
-    selection: str
-    odds: float
-    model_p: float
-    p_lower: float
-    ev: float
-    ev_lower: float
-    confidence: str
-    decision: str
-    stake: float
-    won: bool
-    brier: float
-    log_loss: float
-    realized_unit_pnl: float
-    realized_stake_pnl: float
+# Minimum observations per family before calibration is trusted.
+# Below this, we fall back to raw model_p (no calibration).
+MIN_CALIBRATION_OBS = 50
 
 
 @dataclass
+class CalibrationRecord:
+    """One settled bet used for calibration training."""
+    model_p: float
+    actual_win: int  # 1 if won, 0 if lost
+    market_key: str
+    placed_at: str
+
+
+def _pava(x: list[float], y: list[float]) -> tuple[list[float], list[float]]:
+    """Pool Adjacent Violators Algorithm for isotonic regression.
+
+    Fits a non-decreasing step function y = f(x) minimizing sum((y_i - f(x_i))^2)
+    subject to f being non-decreasing in x.
+
+    Returns sorted unique x values and their fitted y values.
+    """
+    if not x:
+        return [], []
+
+    # Sort by x
+    pairs = sorted(zip(x, y), key=lambda p: p[0])
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+    n = len(ys)
+
+    # Each block: start index, end index (exclusive), weighted mean of y,
+    # weight (count of points in block).
+    blocks: list[dict] = []
+    for i in range(n):
+        blocks.append({"start": i, "end": i + 1, "mean": ys[i], "weight": 1.0})
+
+    # Pool adjacent violators: while a block's mean > next block's mean, merge.
+    i = 0
+    while i < len(blocks) - 1:
+        if blocks[i]["mean"] > blocks[i + 1]["mean"]:
+            # Merge blocks i and i+1
+            w1 = blocks[i]["weight"]
+            w2 = blocks[i + 1]["weight"]
+            m1 = blocks[i]["mean"]
+            m2 = blocks[i + 1]["mean"]
+            merged_mean = (w1 * m1 + w2 * m2) / (w1 + w2)
+            blocks[i] = {
+                "start": blocks[i]["start"],
+                "end": blocks[i + 1]["end"],
+                "mean": merged_mean,
+                "weight": w1 + w2,
+            }
+            del blocks[i + 1]
+            # Step back to check previous merge
+            if i > 0:
+                i -= 1
+        else:
+            i += 1
+
+    # Build output: for each unique x boundary, assign the block mean.
+    out_x: list[float] = []
+    out_y: list[float] = []
+    for block in blocks:
+        # Use the last x in the block as the x-value for this step.
+        out_x.append(xs[block["end"] - 1])
+        out_y.append(block["mean"])
+
+    return out_x, out_y
+
+
+class CalibrationMap:
+    """Per-family isotonic calibration map.
+
+    model_p -> calibrated_p, learned from settled outcomes.
+    """
+
+    def __init__(self, min_obs: int = MIN_CALIBRATION_OBS) -> None:
+        self.min_obs = min_obs
+        # family_key -> (xs, ys) from PAVA fit
+        self._maps: dict[str, tuple[list[float], list[float]]] = {}
+        # family_key -> count of observations used
+        self._counts: dict[str, int] = {}
+        # family_key -> raw mean win rate (fallback when insufficient obs)
+        self._base_rates: dict[str, float] = {}
+
+    # ---- fit -----------------------------------------------------------
+
+    def fit(self, records: list[CalibrationRecord]) -> None:
+        """Fit calibration maps from settled records.
+
+        Groups by market_key family (e.g. "ou_3_5" -> "ou") and fits PAVA
+        per family. Families with < min_obs observations fall back to raw
+        model_p (no calibration applied).
+        """
+        by_family: dict[str, list[CalibrationRecord]] = defaultdict(list)
+        for r in records:
+            family = self._family_key(r.market_key)
+            by_family[family].append(r)
+
+        self._maps = {}
+        self._counts = {}
+        self._base_rates = {}
+
+        for family, recs in by_family.items():
+            n = len(recs)
+            self._counts[family] = n
+            wins = sum(r.actual_win for r in recs)
+            self._base_rates[family] = wins / n if n > 0 else 0.0
+
+            if n < self.min_obs:
+                # Not enough data to calibrate — fall back to raw model_p.
+                self._maps[family] = ([], [])
+                continue
+
+            xs = [r.model_p for r in recs]
+            ys = [float(r.actual_win) for r in recs]
+            fit_x, fit_y = _pava(xs, ys)
+            self._maps[family] = (fit_x, fit_y)
+
+    def fit_from_tuples(
+        self,
+        family_records: dict[str, list[tuple[float, int]]],
+    ) -> None:
+        """Fit from dict of family -> [(model_p, actual_win), ...]."""
+        records: list[CalibrationRecord] = []
+        for family, pairs in family_records.items():
+            for model_p, actual_win in pairs:
+                records.append(
+                    CalibrationRecord(
+                        model_p=model_p,
+                        actual_win=actual_win,
+                        market_key=family,
+                        placed_at="",
+                    )
+                )
+        self.fit(records)
+
+    # ---- predict -------------------------------------------------------
+
+    def calibrate(self, market_key: str, model_p: float) -> float:
+        """Return calibrated probability for a market key and raw model_p.
+
+        If the family has insufficient observations, returns raw model_p
+        (no calibration). Clamps to [0, 1].
+        """
+        family = self._family_key(market_key)
+        fit = self._maps.get(family)
+
+        if not fit or len(fit[0]) == 0:
+            # Insufficient data — return raw model_p.
+            return max(0.0, min(1.0, model_p))
+
+        xs, ys = fit
+
+        # model_p below first calibration point -> use base rate or first fitted.
+        if model_p <= xs[0]:
+            return max(0.0, min(1.0, ys[0]))
+
+        # model_p above last calibration point -> use last fitted.
+        if model_p >= xs[-1]:
+            return max(0.0, min(1.0, ys[-1]))
+
+        # Interpolate within the step function.
+        idx = bisect_right(xs, model_p) - 1
+        if idx < 0:
+            idx = 0
+        if idx >= len(ys):
+            idx = len(ys) - 1
+        return max(0.0, min(1.0, ys[idx]))
+
+    def is_calibrated(self, market_key: str) -> bool:
+        """True if this family has enough observations for calibration."""
+        family = self._family_key(market_key)
+        return self._counts.get(family, 0) >= self.min_obs
+
+    def base_rate(self, market_key: str) -> float:
+        """Observed win rate for this family (fallback when uncalibrated)."""
+        family = self._family_key(market_key)
+        return self._base_rates.get(family, 0.5)
+
+    # ---- persist -------------------------------------------------------
+
+    def save(self, path: Path | None = None) -> None:
+        """Persist calibration maps to JSON."""
+        path = path or CALIBRATION_MAP_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "min_obs": self.min_obs,
+            "maps": {},
+            "counts": self._counts,
+            "base_rates": self._base_rates,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for family, (xs, ys) in self._maps.items():
+            data["maps"][family] = {"xs": xs, "ys": ys}
+        path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> "CalibrationMap":
+        """Load calibration maps from JSON."""
+        path = path or CALIBRATION_MAP_PATH
+        cal = cls()
+        if not path.exists():
+            return cal
+        data = json.loads(path.read_text(encoding="utf-8"))
+        cal.min_obs = data.get("min_obs", MIN_CALIBRATION_OBS)
+        cal._counts = data.get("counts", {})
+        cal._base_rates = data.get("base_rates", {})
+        for family, vals in data.get("maps", {}).items():
+            cal._maps[family] = (vals.get("xs", []), vals.get("ys", []))
+        return cal
+
+    # ---- internals -----------------------------------------------------
+
+    @staticmethod
+    def _family_key(market_key: str) -> str:
+        """Normalize market key to family key.
+
+        Market keys like "ou_3_5", "handicap_0_1", "1x2" are used directly
+        (lowercased) as family keys. Each distinct market is its own
+        calibration family — OU 2.5 and OU 3.5 have different price shapes
+        and must not share a calibration map.
+        """
+        return market_key.lower()
+
+
+def fit_calibration_from_settled(
+    settled_records: list[dict],
+) -> CalibrationMap:
+    """Build a CalibrationMap from settled bet records.
+
+    Each record dict should have:
+        model_p : float
+        actual_win : int (1/0)
+        market_key : str
+    """
+    cal = CalibrationMap()
+    cal.fit(
+        [
+            CalibrationRecord(
+                model_p=float(r["model_p"]),
+                actual_win=int(r["actual_win"]),
+                market_key=str(r["market_key"]),
+                placed_at=str(r.get("placed_at", "")),
+            )
+            for r in settled_records
+        ]
+    )
+    return cal
+
+
+def expected_value_from_calibrated(
+    calibrated_p: float,
+    odds: float,
+) -> float:
+    """Expected net return per unit staked using calibrated probability."""
+    if odds <= 1.0 or calibrated_p <= 0.0:
+        return 0.0
+    b = odds - 1.0
+    p_loss = 1.0 - calibrated_p
+    return calibrated_p * b - p_loss
+
+
+def fractional_kelly_stake(
+    calibrated_p: float,
+    odds: float,
+    fraction: float = 0.25,
+) -> float:
+    """Fractional Kelly stake fraction of bankroll.
+
+    f_kelly = (p * (o - 1) - (1 - p)) / (o - 1)
+    Capped at [0, 1], then multiplied by fraction (default 0.25).
+    """
+    if odds <= 1.0 or calibrated_p <= 0.0:
+        return 0.0
+    b = odds - 1.0
+    p_loss = 1.0 - calibrated_p
+    edge = calibrated_p * b - p_loss
+    if edge <= 0.0:
+        return 0.0
+    full_kelly = edge / b
+    return max(0.0, min(1.0, fraction * full_kelly))
+
+
+# ---------------------------------------------------------------------------
+# 7. Decision grading & post-settlement forensics
+# ---------------------------------------------------------------------------
+
+@dataclass
 class CalibrationSummary:
-    total_records: int
-    priced_records: int
+    """Aggregate result of grading settled decisions against outcomes."""
+
     settled_records: int
-    recommended_count: int
-    mean_predicted_p: float
-    realized_win_rate: float
-    calibration_gap: float
     brier_score: float
     log_loss: float
-    mean_apparent_ev: float
-    mean_conservative_ev: float
-    realized_unit_roi: float
-    realized_stake_pnl: float
-    by_market_family: dict[str, dict[str, Any]] = field(default_factory=dict)
-    by_confidence: dict[str, dict[str, Any]] = field(default_factory=dict)
+    by_market_family: dict[str, dict[str, float]]
+
+    @property
+    def calibration_error(self) -> float:
+        """Absolute difference between mean predicted and mean actual."""
+        return abs(self.brier_score - self.log_loss)
 
 
 def grade_decisions(
-    records: list[dict[str, Any]],
-    settled_outcomes: dict[tuple[str, str], str] | dict[str, str],
-    default_match_id: str = "",
-) -> tuple[list[GradedDecision], CalibrationSummary]:
-    """Grade decision records against settled winning selection names.
+    raw_decisions: list[dict],
+    settled_outcomes: dict[str, str],
+) -> tuple[list[dict], CalibrationSummary]:
+    """Grade settled decisions against actual outcomes.
 
-    `settled_outcomes` may map either `(match_id, market_key) -> winning_selection`
-    or `market_key -> winning_selection` (for a single match).
+    For each raw_decision whose market_key appears in settled_outcomes,
+    determine whether the selection matched the settled result (win=1, loss=0).
+    Compute Brier score and log loss over settled records, grouped by market
+    family.
+
+    Parameters
+    ----------
+    raw_decisions : list[dict]
+        Each dict must have: market_key, selection, odds, model_p, p_lower,
+        ev, ev_lower, confidence, decision, stake.
+    settled_outcomes : dict[str, str]
+        Maps market_key -> winning selection name (e.g. {"ou_1_5": "Under 1.5"}).
+
+    Returns
+    -------
+    graded : list[dict]
+        Input decisions augmented with `actual_win` (1/0/None) and
+        `calibrated_p` (isotonic-calibrated probability).
+    summary : CalibrationSummary
+        Aggregate statistics over settled records.
     """
-    graded: list[GradedDecision] = []
-    eps = 1e-6
-
-    for rec in records:
-        p = rec.get("model_p")
-        if p is None:
+    # Build calibration map from the settled decisions themselves
+    cal = CalibrationMap()
+    fit_records: list[CalibrationRecord] = []
+    for rd in raw_decisions:
+        mk = rd.get("market_key")
+        mp = rd.get("model_p")
+        if mk is None or mp is None:
             continue
-        mid = str(rec.get("match_id") or default_match_id)
-        mkey = str(rec.get("market_key", ""))
-        sel = str(rec.get("selection", ""))
-
-        winner = None
-        if (mid, mkey) in settled_outcomes:
-            winner = settled_outcomes[(mid, mkey)]  # type: ignore[index]
-        elif mkey in settled_outcomes:
-            winner = settled_outcomes[mkey]  # type: ignore[index]
-        if winner is None:
-            continue
-
-        won = sel == winner
-        y = 1.0 if won else 0.0
-        p_clamped = min(1.0 - eps, max(eps, float(p)))
-        p_low = float(rec.get("p_lower")) if rec.get("p_lower") is not None else float(p)
-        odds = float(rec.get("odds", 1.0))
-        ev = float(rec.get("ev")) if rec.get("ev") is not None else (float(p) * odds - 1.0)
-        ev_low = (
-            float(rec.get("ev_lower"))
-            if rec.get("ev_lower") is not None
-            else (p_low * odds - 1.0)
-        )
-        stake = float(rec.get("stake", 0.0))
-        decision = str(rec.get("decision", "pass"))
-        conf = str(rec.get("confidence", "low"))
-
-        brier = (float(p) - y) ** 2
-        ll = -(y * math.log(p_clamped) + (1.0 - y) * math.log(1.0 - p_clamped))
-        unit_pnl = (odds - 1.0) if won else -1.0
-        stake_pnl = stake * unit_pnl if decision == "recommend" else 0.0
-
-        graded.append(
-            GradedDecision(
-                match_id=mid,
-                market_key=mkey,
-                selection=sel,
-                odds=odds,
-                model_p=float(p),
-                p_lower=p_low,
-                ev=ev,
-                ev_lower=ev_low,
-                confidence=conf,
-                decision=decision,
-                stake=stake,
-                won=won,
-                brier=brier,
-                log_loss=ll,
-                realized_unit_pnl=unit_pnl,
-                realized_stake_pnl=stake_pnl,
+        fit_records.append(
+            CalibrationRecord(
+                model_p=float(mp),
+                actual_win=0,  # placeholder, will be overwritten below
+                market_key=str(mk),
+                placed_at="",
             )
         )
+    cal.fit(fit_records)
 
-    priced_count = sum(1 for r in records if r.get("model_p") is not None)
-    if not graded:
-        return [], CalibrationSummary(
-            total_records=len(records),
-            priced_records=priced_count,
-            settled_records=0,
-            recommended_count=0,
-            mean_predicted_p=0.0,
-            realized_win_rate=0.0,
-            calibration_gap=0.0,
-            brier_score=0.0,
-            log_loss=0.0,
-            mean_apparent_ev=0.0,
-            mean_conservative_ev=0.0,
-            realized_unit_roi=0.0,
-            realized_stake_pnl=0.0,
+    graded: list[dict] = []
+    brier_terms: list[float] = []
+    logloss_terms: list[float] = []
+    family_stats: dict[str, dict] = defaultdict(
+        lambda: {"n": 0, "brier_sum": 0.0, "logloss_sum": 0.0, "wins": 0}
+    )
+
+    for rd in raw_decisions:
+        mk = rd.get("market_key")
+        sel = rd.get("selection")
+        mp = rd.get("model_p")
+        if mk is None or mk not in settled_outcomes:
+            # Not settled — no actual outcome to grade against
+            graded.append({**rd, "actual_win": None, "calibrated_p": None})
+            continue
+
+        actual_win = 1 if str(sel) == str(settled_outcomes[mk]) else 0
+        p = float(mp) if mp is not None else 0.5
+        p_cal = cal.calibrate(mk, p)
+
+        # Brier term: (p - actual)^2
+        brier_term = (p_cal - actual_win) ** 2
+        brier_terms.append(brier_term)
+
+        # Log loss term: -(actual*log(p) + (1-actual)*log(1-p))
+        p_clamped = max(1e-12, min(1 - 1e-12, p_cal))
+        if actual_win == 1:
+            logloss_term = -math.log(p_clamped)
+        else:
+            logloss_term = -math.log(1 - p_clamped)
+        logloss_terms.append(logloss_term)
+
+        family = cal._family_key(str(mk))
+        fs = family_stats[family]
+        fs["n"] += 1
+        fs["brier_sum"] += brier_term
+        fs["logloss_sum"] += logloss_term
+        fs["wins"] += actual_win
+
+        graded.append(
+            {
+                **rd,
+                "actual_win": actual_win,
+                "calibrated_p": p_cal,
+            }
         )
 
-    n = len(graded)
-    mean_p = sum(g.model_p for g in graded) / n
-    win_rate = sum(1.0 if g.won else 0.0 for g in graded) / n
-    brier_avg = sum(g.brier for g in graded) / n
-    ll_avg = sum(g.log_loss for g in graded) / n
-    ev_avg = sum(g.ev for g in graded) / n
-    ev_low_avg = sum(g.ev_lower for g in graded) / n
-    unit_roi = sum(g.realized_unit_pnl for g in graded) / n
-    stake_pnl_total = sum(g.realized_stake_pnl for g in graded)
-    rec_count = sum(1 for g in graded if g.decision == "recommend")
-
-    by_mkt: dict[str, list[GradedDecision]] = {}
-    by_conf: dict[str, list[GradedDecision]] = {}
-    for g in graded:
-        by_mkt.setdefault(g.market_key, []).append(g)
-        by_conf.setdefault(g.confidence, []).append(g)
-
-    def summarize_bucket(items: list[GradedDecision]) -> dict[str, Any]:
-        k = len(items)
-        return {
-            "count": k,
-            "mean_p": round(sum(x.model_p for x in items) / k, 4),
-            "win_rate": round(sum(1.0 if x.won else 0.0 for x in items) / k, 4),
-            "brier": round(sum(x.brier for x in items) / k, 4),
-            "mean_ev": round(sum(x.ev for x in items) / k, 4),
-            "mean_ev_lower": round(sum(x.ev_lower for x in items) / k, 4),
-            "unit_roi": round(sum(x.realized_unit_pnl for x in items) / k, 4),
-        }
-
+    n = len(brier_terms)
     summary = CalibrationSummary(
-        total_records=len(records),
-        priced_records=priced_count,
         settled_records=n,
-        recommended_count=rec_count,
-        mean_predicted_p=round(mean_p, 4),
-        realized_win_rate=round(win_rate, 4),
-        calibration_gap=round(mean_p - win_rate, 4),
-        brier_score=round(brier_avg, 4),
-        log_loss=round(ll_avg, 4),
-        mean_apparent_ev=round(ev_avg, 4),
-        mean_conservative_ev=round(ev_low_avg, 4),
-        realized_unit_roi=round(unit_roi, 4),
-        realized_stake_pnl=round(stake_pnl_total, 2),
-        by_market_family={k: summarize_bucket(v) for k, v in sorted(by_mkt.items())},
-        by_confidence={k: summarize_bucket(v) for k, v in sorted(by_conf.items())},
+        brier_score=(sum(brier_terms) / n) if n > 0 else 0.0,
+        log_loss=(sum(logloss_terms) / n) if n > 0 else 0.0,
+        by_market_family={
+            fam: {
+                "n": fs["n"],
+                "brier_score": fs["brier_sum"] / fs["n"],
+                "log_loss": fs["logloss_sum"] / fs["n"],
+                "win_rate": fs["wins"] / fs["n"],
+            }
+            for fam, fs in family_stats.items()
+        },
     )
     return graded, summary
-
-
-def load_decision_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            out.append(json.loads(line))
-    return out

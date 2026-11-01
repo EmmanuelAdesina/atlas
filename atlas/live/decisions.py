@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from atlas.live.calibration import CalibrationMap
 from atlas.live.estimate import Estimate
 from atlas.live.loop import expected_value, selection_correlation_groups
 from atlas.live.math_engine import fractional_kelly_stake
@@ -128,6 +129,7 @@ class DecisionRecord:
     p_lower: Optional[float] = None
     p_upper: Optional[float] = None
     ev_lower: Optional[float] = None
+    calibrated_p: Optional[float] = None
     correlation_groups: list[str] = field(default_factory=list)
     decided_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -139,6 +141,7 @@ class DecisionRecord:
 class DecisionLog:
     path: Path
     policy: PolicyConfig = field(default_factory=PolicyConfig)
+    calibration: CalibrationMap = field(default_factory=CalibrationMap.load)
     _taken: set = field(default_factory=set, repr=False)
     _exposure: dict = field(default_factory=dict, repr=False)
     _group_counts: dict = field(default_factory=dict, repr=False)
@@ -215,10 +218,17 @@ class DecisionLog:
                 groups=groups,
             )
 
+        # Isotonic calibration: raw model_p -> calibrated actual win rate,
+        # learned from settled history. Applied before EV computation so the
+        # gates see calibrated probabilities, not raw model output.
+        if est.p is not None:
+            cal_p = self.calibration.calibrate(market_key, est.p)
+            est.apply_calibration(cal_p)
+
         ev = (
             est.expected_value(odds)
             if (est.p_push > 0.0 or est.p_half_win > 0.0 or est.p_half_loss > 0.0)
-            else expected_value(est.p, odds)
+            else expected_value(est.p_for_ev, odds)
         )
         ev_low = est.conservative_expected_value(odds)
 
@@ -447,6 +457,7 @@ class DecisionLog:
             selection=selection,
             odds=odds,
             model_p=est.p,
+            calibrated_p=est.calibrated_p,
             ev=ev,
             confidence=est.confidence,
             decision=decision,

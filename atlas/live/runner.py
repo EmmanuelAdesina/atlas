@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from atlas.live.arb import Selection, best_arbs, normalized_identity_set
+from atlas.live.calibration import CalibrationMap
 from atlas.live.decisions import PolicyConfig
 from atlas.live.capture import CaptureResult, LiveCapture
 from atlas.live.estimate import CalibratedModel, LiveStateSpaceModel
@@ -215,6 +216,11 @@ class LiveRunner:
         self._balance_observed: Optional[float] = None
         self._unconfirmed_at: Optional[float] = None
         self._balance_alert_fired: bool = False
+        # Isotonic calibration map: raw model_p -> calibrated actual win rate,
+        # learned from settled history. Loaded once at startup; reload on
+        # each cycle would be wasteful — the map is rewritten by the hourly
+        # scorer (data/ops/calibration_maps.json).
+        self._calibration_map: CalibrationMap = CalibrationMap.load()
         # The unconfirmed-placement probe: 'no receipt seen' cannot tell
         # 'never went through' from 'receipt missed', so a SECOND balance
         # read is scheduled ~30s later. A drop against the pre-attempt
@@ -411,6 +417,19 @@ class LiveRunner:
                 est = calibrated.estimate(state, m["market_key"], name)
                 if est.abstained or est.p is None:
                     continue
+                # Isotonic calibration: raw model_p -> calibrated actual win
+                # rate, learned from settled history. Applied AFTER the
+                # CalibratedModel shrinkage (market-anchored blend) so the
+                # isotonic map corrects residual systematic bias that
+                # shrinkage alone cannot fix (e.g. model_p 0.88 for Even/Odd
+                # @1.47 when reality is ~50%).
+                cal_p = self._calibration_map.calibrate(m["market_key"], est.p)
+                cal_p_low = (
+                    self._calibration_map.calibrate(m["market_key"], est.p_lower)
+                    if est.p_lower is not None
+                    else None
+                )
+                est.apply_calibration(cal_p, cal_p_low)
                 # A selection the market itself does not imply a probability
                 # for cannot be calibrated, and an uncalibrated model must
                 # not produce a bet (yesterday's phantom: a cross-wired
@@ -428,9 +447,11 @@ class LiveRunner:
                     market_label=m.get("market_label", ""),
                     selection=name,
                     odds=odds,
-                    model_p=est.p,
+                    # Calibrated probability drives EV and stake sizing.
+                    # Raw model_p is preserved in diagnostics for audit.
+                    model_p=est.p_for_ev,
                     model_name=est.model_name,
-                    p_lower=est.p_lower,
+                    p_lower=est.p_low_for_ev,
                     p_push=est.p_push,
                     model_confidence=est.confidence,
                 )

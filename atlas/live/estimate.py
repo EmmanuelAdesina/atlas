@@ -207,24 +207,43 @@ class Estimate:
     p_half_win: float = 0.0
     p_half_loss: float = 0.0
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    # Calibrated probability (post-isotonic-regression). When set, this is
+    # the probability used for EV and gating; raw `p` is preserved for
+    # diagnostics and audit. None means "no calibration applied / not enough
+    # data for this family".
+    calibrated_p: Optional[float] = None
+    calibrated_p_lower: Optional[float] = None
 
     @property
     def abstained(self) -> bool:
         return self.p is None
 
+    @property
+    def p_for_ev(self) -> Optional[float]:
+        """Probability used for EV computation: calibrated if available, else raw."""
+        return self.calibrated_p if self.calibrated_p is not None else self.p
+
+    @property
+    def p_low_for_ev(self) -> Optional[float]:
+        """Conservative probability: calibrated lower bound if available,
+        else raw p_lower, else raw p."""
+        if self.calibrated_p_lower is not None:
+            return self.calibrated_p_lower
+        return self.p_lower if self.p_lower is not None else self.p
+
     def expected_value(self, odds: float) -> Optional[float]:
-        if self.p is None:
+        if self.p_for_ev is None:
             return None
         return expected_value_detailed(
             odds,
-            p_win=self.p,
+            p_win=self.p_for_ev,
             p_push=self.p_push,
             p_half_win=self.p_half_win,
             p_half_loss=self.p_half_loss,
         )
 
     def conservative_expected_value(self, odds: float) -> Optional[float]:
-        p_low = self.p_lower if self.p_lower is not None else self.p
+        p_low = self.p_low_for_ev
         if p_low is None:
             return None
         return expected_value_detailed(
@@ -234,6 +253,27 @@ class Estimate:
             p_half_win=self.p_half_win,
             p_half_loss=self.p_half_loss,
         )
+
+    def apply_calibration(
+        self,
+        calibrated_p: Optional[float],
+        calibrated_p_lower: Optional[float] = None,
+    ) -> "Estimate":
+        """Attach calibrated probabilities (from isotonic regression).
+
+        Raw `p` and `p_lower` are preserved for audit; `calibrated_p` and
+        `calibrated_p_lower` are what EV and gates use. Returns self for
+        chaining.
+        """
+        self.calibrated_p = (
+            max(0.0, min(1.0, calibrated_p)) if calibrated_p is not None else None
+        )
+        self.calibrated_p_lower = (
+            max(0.0, min(1.0, calibrated_p_lower))
+            if calibrated_p_lower is not None
+            else None
+        )
+        return self
 
 
 class MarketModel(Protocol):
