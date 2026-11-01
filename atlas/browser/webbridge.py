@@ -70,7 +70,7 @@ ALLOWED_ACTIONS = frozenset({
 # still tolerates a heavy page while failing 3× faster. Money-path actions
 # (click/fill/upload) and cold navigations keep the generous default.
 READ_ACTIONS = frozenset({"evaluate", "snapshot", "list_tabs", "network"})
-READ_TIMEOUT_S = 15.0
+READ_TIMEOUT_S = 5.0
 
 
 class WebBridgeError(RuntimeError):

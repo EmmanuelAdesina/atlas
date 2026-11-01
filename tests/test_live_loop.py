@@ -337,7 +337,7 @@ def test_read_actions_use_the_short_timeout_navigate_keeps_the_long_one():
         session="t", client=_mock_client(handler), retry_backoff_s=0.0
     )
     adapter.evaluate("1 + 1")
-    assert seen["timeout"]["read"] == 15.0, (
+    assert seen["timeout"]["read"] == 5.0, (
         "evaluate must fail fast on a wedged page"
     )
     adapter.navigate("https://example.com")
