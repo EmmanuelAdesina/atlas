@@ -788,11 +788,12 @@ def _generous_markets():
     """A live corner market the model genuinely grades HIGH.
 
     9 corners already inside 70 minutes: over 10.5 needs two more, the
-    corner model prices that at 0.82 with live-stat corroboration, and the
-    2.40/1.72 pair de-vigs cleanly (overround ~0.998). No fake certainty:
-    this is the one shape of edge the engine is allowed to recommend — a
-    graded-high estimate on a semantics-verified family whose payoff rules
-    the model does audit.
+    corner model prices that at 0.82 with live-stat corroboration. The
+    1.30/4.60 pair keeps the claimed edge at +6.6% — inside the
+    [min_ev, max_ev] band. The earlier 2.40 price claimed +97%, which was
+    the same shape of fiction as the Perth 'Over 3.5' +46% claims: the
+    ceiling now exists so no fixture (and no live path) can dress an
+    uncalibrated near-certainty as a huge edge.
     """
     return [
         {
@@ -802,8 +803,8 @@ def _generous_markets():
             "status": "open",
             "line": 10.5,
             "selections": [
-                {"name": "Over 10.5", "odds": 2.40},
-                {"name": "Under 10.5", "odds": 1.72},
+                {"name": "Over 10.5", "odds": 1.30},
+                {"name": "Under 10.5", "odds": 4.60},
             ],
         }
     ]

@@ -29,28 +29,44 @@ def run_plan(ledger: Path, fixture: Path = FIXTURE, extra: list[str] | None = No
 
 
 def generous_fixture(tmp_path: Path) -> Path:
-    """A copy of the recorded fixture with a generous price.
+    """A fixture with an edge that survives every honest gate.
 
-    The recorded fixture's prices carry no edge after calibration, which is
-    the honest answer for a prior-only model against a book that prices with
-    live statistics: the 5pp model-market gap guard and the calibration
-    shrink together mean a fairly priced market never qualifies.
+    A prior-only model against a book that prices with live statistics
+    never qualifies: the 5pp model-market gap guard and the calibration
+    shrink mean a fairly priced market carries no edge. And the previous
+    version of this fixture cheated in the OTHER direction — 'Over 1.5'
+    at 70' priced 2.20 while the model saturated at p≈1.0 (needs one goal
+    in 20 minutes with live shots), a +120% 'edge' that is really a
+    mislabeled near-certainty: exactly the shape the absurd-EV ceiling
+    now refuses (2026-11-01 Perth: 'Over 3.5' claiming +46%).
 
-    So the test builds a state and a price where a real edge exists: 70
-    minutes in, 'Over 1.5' at 2.20 against a model probability of 0.64. The
-    gap is 1.5pp, inside the guard, and the edge is +0.33 EV.
+    So the test builds the ONE shape of edge the engine is allowed to
+    recommend: a graded-high estimate on a semantics-verified family whose
+    price is inside the [min_ev, max_ev] band. Nine league-standard
+    corners by 70' — the corner model needs 2 more for Over 10.5 — the
+    book hangs 1.30 against the model's 0.82: +6.6% claimed EV.
     """
     data = json.loads(FIXTURE.read_text(encoding="utf-8"))
     data["state"]["clock_minute"] = 70.0
     data["state"]["clock_label"] = "70:00"
-    data["state"]["home"]["goals"] = 1
+    data["state"]["home"]["goals"] = 0
+    data["state"]["home"]["corners"] = 6
+    data["state"]["away"]["corners"] = 3
+    data["state"]["home"]["shots_on_target"] = 3
+    data["state"]["home"]["shots_total"] = 8
+    data["state"]["home"]["possession_pct"] = 55.0
+    data["state"]["away"]["shots_on_target"] = 2
+    data["state"]["away"]["shots_total"] = 6
+    data["state"]["away"]["possession_pct"] = 45.0
     for market in data.get("markets", []):
         if market.get("market_key") == "ou_1_5":
-            for s in market.get("selections", []):
-                if s.get("name") == "Over 1.5":
-                    s["odds"] = 2.20
-                elif s.get("name") == "Under 1.5":
-                    s["odds"] = 3.60
+            market["market_key"] = "corners_ou_10_5"
+            market["market_label"] = "Corners O/U 10.5"
+            market["line"] = 10.5
+            market["selections"] = [
+                {"name": "Over 10.5", "odds": 1.30},
+                {"name": "Under 10.5", "odds": 4.60},
+            ]
     out = tmp_path / "generous.json"
     out.write_text(json.dumps(data), encoding="utf-8")
     return out
@@ -85,8 +101,8 @@ def test_plan_records_a_bet_when_there_is_a_real_edge(tmp_path):
     placed = [json.loads(l) for l in lines if json.loads(l)["event"] == "bet_placed"]
     assert len(placed) == 1
     rec = placed[0]["record"]
-    assert rec["market_key"] == "ou_1_5"
-    assert rec["selection"] == "Over 1.5"
+    assert rec["market_key"] == "corners_ou_10_5"
+    assert rec["selection"] == "Over 10.5"
     assert rec["stake_ngn"] >= 100
     assert rec["stake_ngn"] <= 1000
 

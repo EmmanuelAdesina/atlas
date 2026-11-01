@@ -200,6 +200,7 @@ class Posture:
             # The portfolio gates EV itself now, so the posture's floor must
             # land in the config that actually gates (2026-10-31 draw burst).
             min_ev=self.min_ev,
+            max_ev=config.max_ev,
             max_bets_per_selection=config.max_bets_per_selection,
             rebalance_ev_delta=config.rebalance_ev_delta,
             rebalance_odds_delta=config.rebalance_odds_delta,

@@ -33,6 +33,9 @@ BETTABLE_CONFIDENCE = {"medium", "high"}
 @dataclass
 class PolicyConfig:
     min_ev: float = 0.05
+    # The absurd-EV ceiling (2026-11-01 Perth session): see
+    # SequentialConfig.max_ev — one-sided live quotes never hand out +25%.
+    max_ev: float = 0.25
     min_ev_lower: Optional[float] = None
     max_bets_per_match: int = 3
     max_correlated_in_group: int = 1
@@ -241,6 +244,23 @@ class DecisionLog:
                 est,
                 "pass",
                 f"EV {(ev or 0.0):.3f} < min {self.policy.min_ev}",
+                ev=ev,
+                ev_lower=ev_low,
+                groups=groups,
+            )
+        # The absurd-EV ceiling: symmetric with the portfolio gate. A claim
+        # above this is a mislabeled model bug, not a price (2026-11-01
+        # Perth: 'Over 3.5' claimed +46% three re-stakes in a row).
+        if ev > self.policy.max_ev:
+            return self._record(
+                match_id,
+                market_key,
+                selection,
+                odds,
+                est,
+                "pass",
+                f"claimed EV {ev:.3f} > max {self.policy.max_ev:.2f} "
+                "(uncalibrated claim, not a price)",
                 ev=ev,
                 ev_lower=ev_low,
                 groups=groups,

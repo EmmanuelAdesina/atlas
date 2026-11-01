@@ -89,7 +89,7 @@ def test_config_defaults():
 
 def test_stake_uses_p_lower_not_model_p():
     opp = make_opp(odds=2.0, model_p=0.7, p_lower=0.6)
-    decisions = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, [])
+    decisions = SequentialPortfolio(SequentialConfig(min_ev=0.05, max_ev=1.0)).evaluate_snapshot([opp], MATCH_STATE, [])
     d = decisions[0]
     assert d.should_bet
     est = Estimate(p=0.7, confidence="high", model_name="t", p_lower=0.6)
@@ -100,7 +100,7 @@ def test_stake_uses_p_lower_not_model_p():
 
 def test_p_lower_none_falls_back_to_model_p():
     opp = make_opp(odds=2.0, model_p=0.7, p_lower=None)
-    d = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, [])[0]
+    d = SequentialPortfolio(SequentialConfig(min_ev=0.05, max_ev=1.0)).evaluate_snapshot([opp], MATCH_STATE, [])[0]
     assert d.should_bet
     assert d.stake_ngn == 400.0
 
@@ -209,7 +209,7 @@ def test_exposure_cap_stakes_capped_then_blocks():
     opp2 = make_opp(
         market_key="ou_2_5_over", selection="over", odds=2.0, model_p=0.7, p_lower=0.6
     )
-    d1, d2 = SequentialPortfolio().evaluate_snapshot([opp1, opp2], MATCH_STATE, hist)
+    d1, d2 = SequentialPortfolio(SequentialConfig(min_ev=0.05, max_ev=1.0)).evaluate_snapshot([opp1, opp2], MATCH_STATE, hist)
     assert d1.should_bet
     assert d1.stake_ngn == 100.0
     assert not d2.should_bet
@@ -226,7 +226,7 @@ def test_max_two_bets_per_snapshot():
             market_key="ou_2_5_over", selection="over", odds=1.9, model_p=0.6, p_lower=0.55
         ),
     ]
-    decisions = SequentialPortfolio().evaluate_snapshot(opps, MATCH_STATE, [])
+    decisions = SequentialPortfolio(SequentialConfig(min_ev=0.05, max_ev=1.0)).evaluate_snapshot(opps, MATCH_STATE, [])
     assert sum(d.should_bet for d in decisions) == 2
     rejected = next(d for d in decisions if not d.should_bet)
     assert "max bets per snapshot" in rejected.reason
@@ -327,7 +327,7 @@ def test_record_bet_round_trip_open_position_cannot_be_restaked():
     """record_bet stores the position; a re-evaluation of the SAME selection
     must refuse to stake it again regardless of rebalance triggers — in this
     regime there is no sell side, so a rebalance is just added exposure."""
-    pf = SequentialPortfolio()
+    pf = SequentialPortfolio(SequentialConfig(min_ev=0.05, max_ev=1.0))
     opp = make_opp(odds=2.0, model_p=0.7, p_lower=0.6)
     decisions = pf.evaluate_snapshot([opp], MATCH_STATE, [])
     assert decisions[0].should_bet
@@ -387,7 +387,7 @@ def test_prior_bets_from_ledger_count_as_exposure():
         model_confidence="medium",
         p_lower=0.57,
     )
-    decisions = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, prior)
+    decisions = SequentialPortfolio(SequentialConfig(min_ev=0.05, max_ev=1.0)).evaluate_snapshot([opp], MATCH_STATE, prior)
     # 3 x 1000 = 3000 NGN already committed == the per-match exposure cap,
     # so the ledger-backed prior state must block any further stake.
     assert decisions[0].should_bet is False

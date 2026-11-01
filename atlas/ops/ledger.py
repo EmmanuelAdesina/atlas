@@ -39,6 +39,12 @@ class BetRecord:
     placed_at: Optional[str] = None
     settled_at: Optional[str] = None
     settled_odds: Optional[float] = None
+    # External settlement (the book's Bet History, written by the recon
+    # settlement job) — the amounts the BOOK reports, overriding any
+    # locally computed PnL. None until the book settles the ticket.
+    settle_ngn: Optional[float] = None
+    book_status: Optional[str] = None
+    settle_source: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -82,8 +88,33 @@ class BetLedger:
                 if not line:
                     continue
                 entry = json.loads(line)
-                rec = BetRecord.from_dict(entry["record"])
-                self._bets[rec.bet_id] = rec
+                event = entry.get("event")
+                rec = entry.get("record") or {}
+                if event == "bet_settled":
+                    # External settlement (Bet History recon): a settlement
+                    # UPDATE on a placed bet, not a new BetRecord. The book's
+                    # status/pnl is authoritative over anything local.
+                    bet = self._bets.get(rec.get("bet_id"))
+                    if bet is None:
+                        continue
+                    if rec.get("status") in SETTLED_STATUSES:
+                        bet.status = rec["status"]
+                    elif rec.get("status"):
+                        # the recon vocabulary ('win'/'loss') vs ledger canon
+                        # ('won'/'lost') — normalize, never silently drop
+                        bet.status = {
+                            "win": "won",
+                            "loss": "lost",
+                        }.get(rec["status"], rec["status"])
+                    bet.pnl_ngn = float(rec.get("pnl_ngn") or 0.0)
+                    bet.settled_at = entry.get("timestamp") or bet.settled_at
+                    bet.settle_ngn = float(rec["settle_ngn"]) if rec.get("settle_ngn") is not None else None
+                    bet.book_status = rec.get("book_status")
+                    bet.settle_source = rec.get("source", "external")
+                    self._bets[bet.bet_id] = bet
+                    continue
+                bet = BetRecord.from_dict(rec)
+                self._bets[bet.bet_id] = bet
 
     def refresh(self) -> None:
         """Re-read the ledger file from disk.

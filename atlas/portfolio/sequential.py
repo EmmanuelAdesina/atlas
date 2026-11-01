@@ -77,6 +77,16 @@ class SequentialConfig:
     # staking the same position again (the 2026-10-31 dOdds 7.3% re-stake
     # churn on one Under 2.5).
     max_bets_per_selection: int = 1
+    # 2026-11-01 Perth session: `ou_3_5 Over 3.5` claimed EV +36.7/+41.0/+46.4
+    # against a live book whose de-vigged price said ~40% at 2.30-2.50. A
+    # single-handed market the engine can re-price every 30s NEVER hands
+    # out 30-50% at NGN stakes — a claim that large is a model bug
+    # (uncalibrated intensity mislabeled as price), and scoreboard luck
+    # camouflages it only until the math catches up. Real edges at this
+    # cadence live in the 1-15% band; a claimed edge above this ceiling is
+    # refused as internally inconsistent, exactly like the 5pp gap bar
+    # refuses large model-vs-market disagreement.
+    max_ev: float = 0.25
     rebalance_ev_delta: float = 0.02
     rebalance_odds_delta: float = 0.06
     min_minutes_between_same_selection: float = 8.0
@@ -308,6 +318,19 @@ class SequentialPortfolio:
                     reject(
                         f"EV {(opp.ev if opp.ev is not None else float('nan')):.3f} "
                         f"< min_ev {cfg.min_ev:.2f}"
+                    )
+                )
+                continue
+            # The absurd-EV ceiling (2026-11-01 Perth session): a live-priced
+            # market re-quoted every 30 seconds never legitimately offers
+            # +25% at NGN stakes; an EV claim that large is the model
+            # disagreeing with a book that knows its own price — the same
+            # pathology as the 5pp gap bar, seen from the ROI side.
+            if opp.ev is not None and opp.ev > cfg.max_ev:
+                decisions.append(
+                    reject(
+                        f"claimed EV {opp.ev:.3f} > max_ev {cfg.max_ev:.2f} "
+                        f"(uncalibrated claim, not a price)"
                     )
                 )
                 continue

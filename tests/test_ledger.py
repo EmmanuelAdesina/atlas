@@ -106,6 +106,54 @@ def test_ledger_reloads_from_jsonl(tmp_path):
     assert reopened.daily_pnl() == pytest.approx(330.0)
 
 
+def test_external_bet_settled_event_updates_the_placed_bet(tmp_path):
+    """Bet History recon writes `bet_settled` events with the BOOK's truth.
+
+    Regression 2026-11-01: the loader constructed a BetRecord from every
+    event's record, so the first external settlement crashed every later
+    loop start with TypeError: unexpected keyword argument 'settle_ngn'.
+    The ledger must ingest them as settlement UPDATES on the placed bet:
+    the book's status and PnL are authoritative over anything local, and
+    the recon's 'win'/'loss' vocabulary must be normalized to the
+    ledger's 'won'/'lost'.
+    """
+    import json as _json
+
+    p = tmp_path / "l.jsonl"
+    led = BetLedger(LedgerConfig(), log_path=str(p))
+    led.place_bet(make_bet("b1", stake=10.0, odds=2.3))
+    settled_ev = {
+        "event": "bet_settled",
+        "timestamp": "2026-11-01T10:00:00+00:00",
+        "record": {
+            "bet_id": "b1",
+            "match_id": "m1",
+            "market_key": "ou_2_5",
+            "selection": "Over 2.5",
+            "stake_ngn": 10.0,
+            "settle_ngn": 14.2,
+            "pnl_ngn": 4.2,
+            "status": "win",
+            "book_time": "01/11/2026 01:14",
+            "book_status": "Won",
+            "source": "bet_history_recon",
+        },
+    }
+    with p.open("a", encoding="utf-8") as f:
+        f.write(_json.dumps(settled_ev) + "\n")
+    reopened = BetLedger(LedgerConfig(), log_path=str(p))
+    s = reopened.summary()
+    assert s["won"] == 1, s
+    assert s["total_pnl_ngn"] == pytest.approx(4.2)
+    assert s["total_staked_ngn"] == pytest.approx(10.0)
+    bet = reopened._bets["b1"]
+    assert bet.status == "won"
+    assert bet.settle_ngn == pytest.approx(14.2)
+    assert bet.book_status == "Won"
+    assert bet.settle_source == "bet_history_recon"
+    assert bet.settled_at is not None
+
+
 def test_summary_shape(tmp_path):
     led = BetLedger(LedgerConfig(), log_path=str(tmp_path / "l.jsonl"))
     led.place_bet(make_bet("b1", stake=100.0))

@@ -295,13 +295,15 @@ def test_a_drifted_rebalance_cannot_re_stake_an_open_position():
         placed_bets=[dict(_now_placed(odds=1.55, ev=0.12))],
     )
     defy = make_opp(market_key="ou_2_5", selection="Under 2.5",
-                    odds=2.9, model_p=0.55, p_lower=0.47)
+                    odds=2.9, model_p=0.42, p_lower=0.37)
     defy.model_confidence = "medium"
     second = portfolio.evaluate_snapshot(
         opportunities=[defy], match_state=MATCH_STATE,
-        placed_bets=[dict(_now_placed(odds=2.8, ev=0.54))],
+        placed_bets=[dict(_now_placed(odds=2.8, ev=0.12))],
     )
     assert second[0].should_bet is False
+    # either gate refusing is correct — but at EV 0.218 (inside the band)
+    # the refusal must be the DRIFT cap, not the absurd-EV ceiling
     assert "position already open" in second[0].reason
 
 
@@ -392,3 +394,107 @@ def test_price_match_stamps_a_priced_grade_onto_every_opportunity(tmp_path):
     assert opps and all(
         o.model_confidence == "medium" for o in opps
     ), [f"{o.market_key}/{o.selection}: {o.model_confidence}" for o in opps]
+
+
+# --- the 2026-11-01 Perth pathologies, gate-by-gate ------------------------
+
+
+def test_drift_chase_on_handicap_draw_is_blocked_at_every_price():
+    """The exact tape: `handicap_0_3 Draw (0:3)` staked at 2.65, then the
+    book cut to 2.45 / 2.30 / 2.15 and the old engine re-loaded each time.
+    max_bets_per_selection=1 must refuse the SAME selection at ANY price
+    while the position is open — the price direction is irrelevant."""
+    from atlas.portfolio.sequential import SequentialConfig, SequentialPortfolio
+
+    cfg = SequentialConfig(min_ev=0.05)
+    pf = SequentialPortfolio(cfg)
+    placed_draw = dict(_now_placed(
+        market_key="handicap_0_3", selection="Draw (0:3)", odds=2.65, ev=0.06
+    ))
+    refused = 0
+    # EV held inside the [min_ev, max_ev] band at every price, so ONLY the
+    # one-position cap can refuse — the tape never gets a second load.
+    for price, p in ((2.45, 0.449), (2.30, 0.478), (2.15, 0.512)):
+        opp = make_opp(
+            market_key="handicap_0_3", selection="Draw (0:3)",
+            odds=price, model_p=p, p_lower=p - 0.03,
+        )
+        opp.model_confidence = "medium"
+        d = pf.evaluate_snapshot([opp], MATCH_STATE, [placed_draw])[0]
+        assert d.should_bet is False, f"price {price} was NOT refused"
+        assert "position already open" in d.reason, f"price {price}: {d.reason}"
+        refused += 1
+    assert refused == 3
+
+
+def test_near_certainty_turnover_farming_is_blocked():
+    """The exact tape: `goals_in_row_2_away No @1.10-1.17` staked NGN 10 to
+    win 0.4-1.7 with claimed EV +0.7-2.8% — turnover with no edge. The EV
+    floor exists for precisely this shape."""
+    from atlas.portfolio.sequential import SequentialConfig, SequentialPortfolio
+
+    cfg = SequentialConfig(min_ev=0.05)
+    pf = SequentialPortfolio(cfg)
+    for odds, p in ((1.10, 0.92), (1.13, 0.90), (1.17, 0.88), (1.08, 0.93)):
+        opp = make_opp(
+            market_key="goals_in_row_2_away", selection="No",
+            odds=odds, model_p=p, p_lower=p - 0.03,
+        )
+        opp.model_confidence = "medium"
+        d = pf.evaluate_snapshot([opp], MATCH_STATE, [])[0]
+        assert d.should_bet is False, f"odds {odds} was NOT refused"
+        assert "min_ev" in d.reason
+
+
+def test_absurd_ev_claim_is_ceilinged():
+    """The exact tape: `ou_3_5 Over 3.5` claimed +36.7/+41.0/+46.4% against
+    a book at 2.30-2.50 whose de-vigged price said ~40%. A live re-quoted
+    market NEVER hands out +25%; the ceiling refuses the claim regardless
+    of where the model's confidence grade landed."""
+    from atlas.portfolio.sequential import SequentialConfig, SequentialPortfolio
+
+    cfg = SequentialConfig(min_ev=0.05, max_ev=0.25)
+    pf = SequentialPortfolio(cfg)
+    for odds, p, ev in ((2.30, 0.59, 0.367), (2.45, 0.58, 0.410), (2.50, 0.59, 0.464)):
+        opp = make_opp(
+            market_key="ou_3_5", selection="Over 3.5",
+            odds=odds, model_p=p, p_lower=p - 0.04,
+        )
+        # deliberately graded HIGH: the ceiling must hold even for the
+        # designed real-edge hunt at the highest trust level
+        opp.model_confidence = "high"
+        d = pf.evaluate_snapshot([opp], MATCH_STATE, [])[0]
+        assert d.should_bet is False, f"odds {odds} ev {ev} was NOT refused"
+        assert "max_ev" in d.reason
+
+
+def test_sane_edge_still_passes_the_band():
+    """The band is [min_ev, max_ev]: a modest, believable edge on a graded
+    estimate still reaches the stake computation — the ceiling must not
+    close the engine entirely."""
+    from atlas.portfolio.sequential import SequentialConfig, SequentialPortfolio
+
+    cfg = SequentialConfig(min_ev=0.05, max_ev=0.25)
+    pf = SequentialPortfolio(cfg)
+    opp = make_opp(odds=2.0, model_p=0.56, p_lower=0.54)  # ev = +0.12
+    opp.model_confidence = "medium"
+    d = pf.evaluate_snapshot([opp], MATCH_STATE, [])[0]
+    assert d.should_bet is not False or "max_ev" not in d.reason
+
+
+def test_decisions_engine_holds_the_same_ceiling():
+    from atlas.live.decisions import PolicyConfig, compute_recommended_stake_ngn  # noqa
+    from atlas.live.estimate import Estimate
+
+    pc = PolicyConfig()
+    assert pc.max_ev == 0.25
+    assert PolicyConfig(max_ev=0.4).max_ev == 0.4
+
+
+def test_posture_forwards_the_ceiling_to_the_portfolio():
+    from atlas.ops.posture import Posture, PostureMode
+    from atlas.portfolio.sequential import SequentialConfig
+
+    posture = Posture(mode=PostureMode.BALANCED)
+    cfg = posture.apply_to(SequentialConfig())
+    assert cfg.max_ev == 0.25
