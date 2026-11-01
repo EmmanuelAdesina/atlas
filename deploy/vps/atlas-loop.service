@@ -1,0 +1,38 @@
+[Unit]
+Description=ATLAS live trading loop (SUBMIT ARMED - hard daily stop -NGN 200, observed balance governs)
+ConditionPathExists=/opt/atlas/live-armed
+Documentation=file:///opt/atlas/docs/bugs_and_issues.md
+After=network-online.target atlas-browser.service kimi-webbridge.service
+Wants=network-online.target
+Requires=atlas-browser.service
+# SINGLE-SUBMITTER INVARIANT: starting this loop stops the shadow loop.
+Conflicts=atlas-shadow.service
+# BOOT-SAFETY GATE: this unit only starts if the operator laid down the
+# /opt/atlas/live-armed flag file. Remove the flag to disarm once, clean.
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/atlas
+EnvironmentFile=/opt/atlas/.env
+# --submit ARMED. Stakes: operator NGN 10 flat regime (capped in posture);
+# bankroll is a CEILING only - the real observed account balance clamps it.
+# The hard daily stop resets at 00:00 UTC (= 01:00 Lagos).
+ExecStart=/opt/atlas/.venv/bin/python -m atlas.main run --submit --cycle-seconds 30 --bankroll 100000 --daily-loss-limit -200 --ledger data/ops/ledger.jsonl
+Restart=always
+RestartSec=15
+TimeoutStopSec=30
+KillSignal=SIGINT
+Nice=8
+CPUWeight=50
+MemoryHigh=300M
+MemoryMax=450M
+LogsDirectory=atlas
+StandardOutput=append:/var/log/atlas/loop.log
+StandardError=append:/var/log/atlas/loop.err
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/atlas/data /var/log/atlas
+
+[Install]
+WantedBy=multi-user.target
