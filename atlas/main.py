@@ -682,6 +682,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 model_name=est.model_name,
                 p_lower=est.p_lower,
                 p_push=est.p_push,
+                model_confidence=est.confidence,
             )
             if (opp.ev_lower or opp.ev) >= max(args.min_ev, posture.min_ev):
                 opportunities.append(opp)

@@ -25,6 +25,9 @@ def make_opp(
         model_p=model_p,
         p_lower=p_lower,
         model_name=model_name,
+        # A utility default standing in for "priced and trusted": the tests
+        # here exercise stake/cap/rate arithmetic, not the confidence bar.
+        model_confidence="medium",
     )
 
 
@@ -92,7 +95,7 @@ def test_stake_uses_p_lower_not_model_p():
     est = Estimate(p=0.7, confidence="high", model_name="t", p_lower=0.6)
     expected = compute_recommended_stake_ngn(est, 2.0, PolicyConfig(kelly_fraction=0.10))
     assert d.stake_ngn == expected == 200.0
-    assert d.factor_counts == {"home_goals": 1, "home_supremacy": 1}
+    assert d.factor_counts == {"1x2_family": 1, "home_goals": 1, "home_supremacy": 1}
 
 
 def test_p_lower_none_falls_back_to_model_p():
@@ -109,7 +112,7 @@ def test_stake_below_min_is_skipped():
     d = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, [])[0]
     assert not d.should_bet
     assert d.stake_ngn == 0.0
-    assert "below min" in d.reason
+    assert ("below min" in d.reason) or ("min_ev" in d.reason)
 
 
 # --- flat sizing mode (operator decision 2026-10-28) -----------------------
@@ -232,7 +235,16 @@ def test_max_two_bets_per_snapshot():
 def test_max_five_bets_per_minute():
     now = datetime.now(timezone.utc)
     hist = [
-        placed(ts=now - timedelta(seconds=10 * (i + 1))) for i in range(5)
+        placed(market_key=k, selection=s, ts=now - timedelta(seconds=10 * (i + 1)))
+        for i, (k, s) in enumerate(
+            [
+                ("ou_1_5_over", "over"),
+                ("ou_1_5", "under"),
+                ("btts", "yes"),
+                ("handicap_0_2", "Home (-2)"),
+                ("goals_in_row_2_any", "No"),
+            ]
+        )
     ]
     opp = make_opp(odds=2.0, model_p=0.6, p_lower=0.55)
     d = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, hist)[0]
@@ -243,7 +255,16 @@ def test_max_five_bets_per_minute():
 def test_per_minute_window_expires():
     now = datetime.now(timezone.utc)
     hist = [
-        placed(ts=now - timedelta(seconds=65 * (i + 1))) for i in range(5)
+        placed(market_key=k, selection=s, ts=now - timedelta(seconds=65 * (i + 1)))
+        for i, (k, s) in enumerate(
+            [
+                ("ou_1_5_over", "over"),
+                ("ou_1_5", "under"),
+                ("btts", "yes"),
+                ("handicap_0_2", "Home (-2)"),
+                ("goals_in_row_2_any", "No"),
+            ]
+        )
     ]
     opp = make_opp(odds=2.0, model_p=0.6, p_lower=0.55)
     d = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, hist)[0]
@@ -253,9 +274,9 @@ def test_per_minute_window_expires():
 def test_factor_mapping_covers_eight_risk_factors():
     assert selection_correlation_groups("ou_2_5_over", "over") == ["total_goals"]
     assert selection_correlation_groups("ou_2_5_over", "under") == ["low_tempo_under"]
-    assert selection_correlation_groups("1x2", "home") == ["home_goals", "home_supremacy"]
-    assert selection_correlation_groups("1x2", "away") == ["away_goals", "away_supremacy"]
-    assert selection_correlation_groups("1x2", "draw") == ["low_tempo_under"]
+    assert selection_correlation_groups("1x2", "home") == ["1x2_family", "home_goals", "home supremacy".replace(" supremacy", "_supremacy")]
+    assert selection_correlation_groups("1x2", "away") == ["1x2_family", "away_goals", "away_supremacy"]
+    assert selection_correlation_groups("1x2", "draw") == ["1x2_family", "low_tempo_under"]
     assert selection_correlation_groups("home_corners_5_5_over", "over") == ["home_corners"]
     assert selection_correlation_groups("away_corners_6_5_over", "over") == ["away_corners"]
 
@@ -302,17 +323,21 @@ def test_should_not_rebalance_when_quiet():
     assert not SequentialPortfolio().should_rebalance(opp, hist, MATCH_STATE)
 
 
-def test_record_bet_round_trip_no_rebalance_when_unchanged():
+def test_record_bet_round_trip_open_position_cannot_be_restaked():
+    """record_bet stores the position; a re-evaluation of the SAME selection
+    must refuse to stake it again regardless of rebalance triggers — in this
+    regime there is no sell side, so a rebalance is just added exposure."""
     pf = SequentialPortfolio()
     opp = make_opp(odds=2.0, model_p=0.7, p_lower=0.6)
     decisions = pf.evaluate_snapshot([opp], MATCH_STATE, [])
+    assert decisions[0].should_bet
     entry = pf.record_bet(decisions[0], MATCH_STATE)
     assert entry["stake"] == decisions[0].stake_ngn
 
     opp2 = make_opp(odds=2.0, model_p=0.7, p_lower=0.6)
     d2 = pf.evaluate_snapshot([opp2], MATCH_STATE, [entry])[0]
     assert not d2.should_bet
-    assert "no rebalance trigger" in d2.reason
+    assert "position already open" in d2.reason
 
 
 # --- Integration: canonical ledger records must feed portfolio accounting ---
@@ -329,18 +354,22 @@ def test_prior_bets_from_ledger_count_as_exposure():
 
     tmp = os.path.join(tempfile.mkdtemp(prefix="atlas-portfolio-"), "ledger.jsonl")
     ledger = BetLedger(LedgerConfig(), log_path=tmp)
-    for _ in range(3):
+    for mk, sel, st in (
+        ("ou_2_5", "Over 2.5", 1000.0),
+        ("ou_1_5", "Over 1.5", 1000.0),
+        ("btts", "Yes", 1000.0),
+    ):
         ledger.record_pending(
             {
                 "match_id": "m1",
-                "market_key": "ou_2_5",
-                "selection": "Over 2.5",
+                "market_key": mk,
+                "selection": sel,
                 "odds": 2.0,
-                "stake_ngn": 1000.0,
+                "stake_ngn": st,
                 "model_p": 0.6,
                 "p_lower": 0.55,
                 "ev": 0.2,
-                "confidence": "unknown",
+                "confidence": "medium",
             }
         )
     prior = ledger.bets_for("m1")
@@ -350,11 +379,12 @@ def test_prior_bets_from_ledger_count_as_exposure():
 
     opp = Opportunity(
         match_id="m1",
-        market_key="ou_2_5",
-        selection="Over 2.5",
+        market_key="ou_4",
+        selection="Under 4",
         odds=2.1,
         model_p=0.62,
         model_name="test-model",
+        model_confidence="medium",
         p_lower=0.57,
     )
     decisions = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, prior)
@@ -393,6 +423,7 @@ def test_ledger_backed_prior_bets_trigger_rebalance_not_fresh_bet():
         odds=2.0,
         model_p=0.6,
         model_name="test-model",
+        model_confidence="medium",
         p_lower=0.55,
     )
     decisions = SequentialPortfolio().evaluate_snapshot([opp], MATCH_STATE, prior)

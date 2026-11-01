@@ -64,6 +64,24 @@ def selection_correlation_groups(market_key: str, selection: str = "") -> list[s
 
     # Canonical SportyBet factor mapping
     if mkey in ("1x2", "1x2_1h", "1x2_2h", "rest_of_match", "rest_of_match_1x2", "dnb", "draw_no_bet"):
+        groups.add("1x2_family")  # one event, every variant of it
+        if sel in ("home", "1"):
+            groups.add("home_goals")
+            groups.add("home_supremacy")
+        elif sel in ("away", "2"):
+            groups.add("away_goals")
+            groups.add("away_supremacy")
+        elif sel in ("draw", "x"):
+            groups.add("low_tempo_under")
+
+    # The book's DERIVATIVE 1x2 variants (1up / 2up / never-down — early
+    # payout and promo products) settle from the SAME match state; picking
+    # Home on 'never down' is the same economic position as picking Home
+    # on plain 1x2 until the promo's terms change the payoff. Group them
+    # so a 2.05 Draw on four variants cannot stack 4x in two minutes
+    # (2026-10-31: six draw-family bets on one match in seven minutes).
+    if mkey.startswith("1x2_"):
+        groups.add("1x2_family")
         if sel in ("home", "1"):
             groups.add("home_goals")
             groups.add("home_supremacy")
@@ -102,12 +120,28 @@ def selection_correlation_groups(market_key: str, selection: str = "") -> list[s
             groups.add("low_tempo_under")
 
     elif mkey.startswith(("ah_", "asian_handicap_", "handicap_")):
+        # Any handicap product on this match shares the handicap_family
+        # group: the markets are the same event celu the line difference,
+        # so multiple handicap positions must be visible to one cap.
+        groups.add("handicap_family")
         if sel.startswith("home"):
             groups.add("home_supremacy")
             groups.add("home_goals")
         elif sel.startswith("away"):
             groups.add("away_supremacy")
             groups.add("away_goals")
+
+    elif mkey.startswith("goals_in_row"):
+        # 'Goals in a row' markets breathe the same economics as fewer-goals
+        # positions: 'No' on any row variant is an increasingly-drawish /
+        # low-tempo stance and must share its cap with the unders family;
+        # a 'Yes' side adds to goal totals.
+        if sel.strip().lower().startswith("no"):
+            groups.add("low_tempo_under")
+            groups.add("goals_in_row_family")
+        else:
+            groups.add("total_goals")
+            groups.add("goals_in_row_family")
 
     elif "corner" in mkey:
         if "home" in mkey:
@@ -162,6 +196,12 @@ class Opportunity:
     market_label: str = ""
     p_lower: Optional[float] = None
     p_push: float = 0.0
+    # The calibration layer's confidence grade (high/medium/low) at pricing
+    # time. The portfolio's betting bar is expressed in grades, so the grade
+    # must survive the pricing → opportunity → portfolio hop: a prior-only,
+    # no-live-stats estimate graded 'low' was relabelled 'high' downstream
+    # and reached the book as an Under 2.5 bet at 2:0 (2026-10-31 21:59).
+    model_confidence: str = "unknown"
     ev: float = field(init=False)
     ev_lower: float = field(init=False)
     breakeven_p: float = field(init=False)

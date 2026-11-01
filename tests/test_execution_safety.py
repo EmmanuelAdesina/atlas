@@ -93,6 +93,7 @@ class FakeDecision:
             selection="Home",
             odds=odds,
             model_p=p,
+            model_confidence="medium",
         )
         self.stake_ngn = stake
         self.should_bet = should_bet
@@ -748,8 +749,22 @@ class _FakeCapture:
         self.markets = markets
         self.state = state or LiveMatchState(
             match_id="m1",
-            home=TeamStats(name="Home", goals=1),
-            away=TeamStats(name="Away", goals=0),
+            home=TeamStats(
+                name="Home",
+                goals=0,
+                corners=6,
+                shots_on_target=3,
+                shots_total=8,
+                possession_pct=55,
+            ),
+            away=TeamStats(
+                name="Away",
+                goals=0,
+                corners=3,
+                shots_on_target=2,
+                shots_total=6,
+                possession_pct=45,
+            ),
             period="2h",
             clock_minute=70.0,
             observed_at=__import__("datetime").datetime.now(
@@ -770,18 +785,25 @@ class _FakeCapture:
 
 
 def _generous_markets():
+    """A live corner market the model genuinely grades HIGH.
+
+    9 corners already inside 70 minutes: over 10.5 needs two more, the
+    corner model prices that at 0.82 with live-stat corroboration, and the
+    2.40/1.72 pair de-vigs cleanly (overround ~0.998). No fake certainty:
+    this is the one shape of edge the engine is allowed to recommend — a
+    graded-high estimate on a semantics-verified family whose payoff rules
+    the model does audit.
+    """
     return [
         {
             "match_id": "m1",
-            "market_key": "ou_1_5",
-            "market_label": "Over/Under",
+            "market_key": "corners_ou_10_5",
+            "market_label": "Corners O/U 10.5",
             "status": "open",
-            "line": 1.5,
+            "line": 10.5,
             "selections": [
-                # Priced so the model and the book agree closely (the 5pp gap
-                # guard) but the book is still generous: EV +0.06.
-                {"name": "Over 1.5", "odds": 2.50},
-                {"name": "Under 1.5", "odds": 1.56},
+                {"name": "Over 10.5", "odds": 2.40},
+                {"name": "Under 10.5", "odds": 1.72},
             ],
         }
     ]
@@ -1183,3 +1205,81 @@ def test_the_probe_gives_up_loudly_without_any_reading(ledger):
     assert any(
         k == "warn" and "Phantom probe" in t for k, t in notifier.calls
     ), "giving up silently would hide a possible phantom bet"
+
+
+# --- liveness pulse: the heartbeat must never go quiet while the process
+# is alive, no matter how long one cycle stretches (2026-10-31 stale) ---
+
+def _hb(tmp_path):
+    import json as _json
+    return _json.loads((tmp_path / "heartbeat.json").read_text(encoding="utf-8"))
+
+
+def test_the_heartbeat_carries_the_live_stage(ledger, tmp_path):
+    import json as _json
+
+    from atlas.live.runner import CycleReport
+
+    runner = LiveRunner(
+        capture=None, ledger=ledger, state_path=str(tmp_path / "state.json"),
+    )
+    runner._stage_set("cycle 9: capture")
+    runner._write_heartbeat(
+        CycleReport(cycle=9, at="t", ready=False, reason="r")
+    )
+    hb = _json.loads((tmp_path / "heartbeat.json").read_text(encoding="utf-8"))
+    assert hb["stage"] == "cycle 9: capture"
+    assert hb["stage_age_s"] is not None and hb["stage_age_s"] >= 0.0
+
+
+def test_a_mid_cycle_pulse_reports_the_working_stage(ledger, tmp_path):
+    import json as _json
+    import time as _time
+
+    runner = LiveRunner(
+        capture=None, ledger=ledger, state_path=str(tmp_path / "state.json"),
+    )
+    runner._cycle_open = True
+    runner._stage_set("cycle 5: capture")
+    runner._hb_last_write = _time.monotonic() - 60.0  # heartbeat went quiet
+    assert runner._pulse_once() is True
+    hb = _json.loads((tmp_path / "heartbeat.json").read_text(encoding="utf-8"))
+    assert "working (stage cycle 5: capture" in hb["reason"]
+    assert hb["ready"] is False
+    # the write itself refreshed the quiet-window bookkeeping
+    assert _time.monotonic() - runner._hb_last_write < 5.0
+
+
+def test_an_idle_pulse_republishes_the_last_report_fresh(ledger, tmp_path):
+    import json as _json
+    import time as _time
+
+    from atlas.live.runner import CycleReport
+
+    runner = LiveRunner(
+        capture=None, ledger=ledger, state_path=str(tmp_path / "state.json"),
+    )
+    last = CycleReport(cycle=41, at="old", ready=True, reason="ready")
+    runner.reports.append(last)
+    runner._hb_last_write = _time.monotonic() - 60.0
+    runner._pulse_once()
+    hb = _json.loads((tmp_path / "heartbeat.json").read_text(encoding="utf-8"))
+    assert hb["ready"] is True
+    assert hb["reason"] == "ready"
+    assert hb["cycle"] == 41
+    assert hb["at"] != "old", "the pulse must refresh the timestamp"
+
+
+def test_a_fresh_heartbeat_is_never_stomped_by_the_pulse(ledger, tmp_path):
+    import time as _time
+
+    from atlas.live.runner import CycleReport
+
+    runner = LiveRunner(
+        capture=None, ledger=ledger, state_path=str(tmp_path / "state.json"),
+    )
+    runner.reports.append(CycleReport(cycle=1, at="recent", ready=True, reason="ready"))
+    runner._write_heartbeat(runner.reports[0])
+    before = (tmp_path / "heartbeat.json").read_text(encoding="utf-8")
+    runner._pulse_once()
+    assert (tmp_path / "heartbeat.json").read_text(encoding="utf-8") == before

@@ -32,7 +32,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from atlas.live.decisions import PolicyConfig, compute_recommended_stake_ngn
+from atlas.live.decisions import (
+    BETTABLE_CONFIDENCE,
+    PolicyConfig,
+    compute_recommended_stake_ngn,
+)
 from atlas.live.estimate import Estimate
 from atlas.live.loop import Opportunity, selection_correlation_groups
 
@@ -62,6 +66,17 @@ class SequentialConfig:
     max_bets_per_minute: int = 5
     max_correlated_in_group: int = 12
     ev_threshold_high_correlation: float = 0.12
+    # The EV floor the posture sets (decisions.py's gate lives in a different
+    # path; the portfolio makes the actual call, so it must hold the bar too).
+    # 2026-10-31: '1x2 Draw' at EV 0.0315 was recommended because this floor
+    # was never checked here.
+    min_ev: float = 0.05
+    # A rebalance is not a new bet in this regime (no sell side exists — the
+    # portfolio can only ADD exposure). One open position per
+    # match/market/selection; an odds or EV drift downstream NEVER justifies
+    # staking the same position again (the 2026-10-31 dOdds 7.3% re-stake
+    # churn on one Under 2.5).
+    max_bets_per_selection: int = 1
     rebalance_ev_delta: float = 0.02
     rebalance_odds_delta: float = 0.06
     min_minutes_between_same_selection: float = 8.0
@@ -160,7 +175,10 @@ def _event_count(events: Any) -> Optional[int]:
 def _estimate_for(opp: Opportunity) -> Estimate:
     return Estimate(
         p=opp.model_p,
-        confidence="high",
+        # The grade travels with the opportunity — relabelling a prior-only
+        # 'low' estimate to 'high' here is what let it reach the book
+        # (2026-10-31 Under 2.5 @ 2:0). Downstream gates must see the truth.
+        confidence=getattr(opp, "model_confidence", None) or "unknown",
         model_name=opp.model_name,
         p_lower=opp.p_lower,
         p_upper=opp.model_p,
@@ -280,6 +298,50 @@ class SequentialPortfolio:
                     reason=reason,
                     factor_counts=dict(current_counts),
                 )
+
+            # The EV floor is enforced HERE, not only in the policy engine:
+            # the live loop's decisions come from this portfolio, and the
+            # 2026-10-31 draw burst showed selections below the posture's
+            # min_ev reaching the book when this check was missing.
+            if opp.ev is None or opp.ev < cfg.min_ev:
+                decisions.append(
+                    reject(
+                        f"EV {(opp.ev if opp.ev is not None else float('nan')):.3f} "
+                        f"< min_ev {cfg.min_ev:.2f}"
+                    )
+                )
+                continue
+            # The confidence gate: only estimates the pricing layer graded
+            # medium/high are actionable. A 'low' grade means prior-only
+            # intensity or wide intervals — pricing, never betting.
+            if opp.model_confidence not in BETTABLE_CONFIDENCE:
+                decisions.append(
+                    reject(
+                        f"confidence '{opp.model_confidence}' below betting bar "
+                        f"({'+'.join(sorted(BETTABLE_CONFIDENCE))})"
+                    )
+                )
+                continue
+            # One position per selection: an open position plus a rebalance
+            # trigger must never mint a second stake on the same economic
+            # bet — there is no sell side, so 'rebalancing' here is just
+            # adding exposure for free.
+            same_position = sum(
+                1
+                for bet in prior
+                if bet.get("match_id") == mid
+                and bet.get("market_key") == opp.market_key
+                and bet.get("selection") == opp.selection
+            )
+            if same_position >= cfg.max_bets_per_selection:
+                decisions.append(
+                    reject(
+                        f"position already open on this market/selection "
+                        f"({same_position} {'bet' if same_position == 1 else 'bets'}; "
+                        f"max {cfg.max_bets_per_selection} — drift is not a new bet)"
+                    )
+                )
+                continue
 
             blocked = next(
                 (

@@ -420,6 +420,7 @@ class LiveRunner:
                     model_name=est.model_name,
                     p_lower=est.p_lower,
                     p_push=est.p_push,
+                    model_confidence=est.confidence,
                 )
                 opportunities.append(opp)
                 selections.append(
@@ -1218,7 +1219,11 @@ class LiveRunner:
                         "model_p": d.opportunity.model_p,
                         "p_lower": d.opportunity.p_lower,
                         "ev": d.opportunity.ev,
-                        "confidence": "unknown",
+                        # The REAL pricing-time grade: an operator auditing a
+                        # night of bets must see which of them the model was
+                        # even confident about (2026-10-31: 'unknown' hid the
+                        # prior-only intensity behind the Under 2.5 @ 2.75).
+                        "confidence": d.opportunity.model_confidence,
                     }
                 )
             except Exception as e:
@@ -1400,6 +1405,7 @@ class LiveRunner:
 
     def run_cycle(self) -> CycleReport:
         self.cycle += 1
+        self._stage_set(f"cycle {self.cycle}: capture")
         report = CycleReport(
             cycle=self.cycle,
             at=datetime.now(timezone.utc).isoformat(),
@@ -1630,6 +1636,7 @@ class LiveRunner:
         # P1: an open losing position gets a cashout decision every cycle.
         # Without this the position just sits there losing while the loop
         # only ever considers new bets.
+        self._stage_set(f"cycle {self.cycle}: cashout")
         try:
             cashouts = self.handle_cashout_offers()
         except Exception as e:

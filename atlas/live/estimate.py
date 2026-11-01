@@ -659,6 +659,34 @@ class CalibratedModel:
 
     _SHRINK = {"high": 0.0, "medium": 0.5, "low": 0.75}
 
+    # SportyBet's DERIVATIVE 1x2 products (early payout / promo variants:
+    # '1up', '2up', 'never down'). The base model's implication rules treat
+    # them as plain 1x2, but their true payoff terms are NOT verified. On
+    # 2026-10-31 a high-confidence disagreement on these keys was allowed
+    # straight through — 'never_down Draw' claimed p 0.611 against the
+    # book's implied ~0.50 (a phantom +18% EV) and was re-staked three
+    # times in seven minutes. For families the base model cannot verify the
+    # semantics of, the book's own de-vigged price is the authority: the
+    # estimate must agree with it within the 5pp bar, or abstain.
+    DERIVATIVE_1X2_VARIANTS = frozenset(
+        {"1x2_1up", "1x2_2up", "1x2_never_down"}
+    )
+
+    @classmethod
+    def _semantics_unverified(cls, market_key: str) -> bool:
+        """True when this market's payoff terms are beyond the model's audit.
+
+        A confident disagreement with the market on a behavioural family the
+        model understands (1x2, totals, handicaps, corners...) can be real
+        edge. A confident disagreement on a promo-derivative or streak
+        product is overwhelmingly a misreading of the product's rules, and
+        the night's ledger (six draw-family phantom re-stakes, +44% claimed
+        'goals in a row' edges) is the standing evidence.
+        """
+        if market_key in cls.DERIVATIVE_1X2_VARIANTS:
+            return True
+        return market_key.startswith("goals_in_row")
+
     def estimate(
         self, state: LiveMatchState, market_key: str, selection: str
     ) -> Estimate:
@@ -667,7 +695,15 @@ class CalibratedModel:
             return base
 
         shrink = self._SHRINK.get(base.confidence, 0.75)
-        if shrink == 0.0:
+        # At high confidence the shrink weight is zero: for semantics-
+        # verified families the calibrated price IS the model's own — the
+        # portfolio's grade gate is what stops book-bad priors from
+        # becoming stakes. For semantics-UNVERIFIED families (derivative
+        # 1x2 promos, 'goals in a row' streak products) the flow continues
+        # to the market-gap check below at every grade: there the book is
+        # the authority because nobody has audited the product's payoff
+        # terms (2026-10-31: 'never_down Draw', 'goals_in_row No').
+        if shrink == 0.0 and not self._semantics_unverified(market_key):
             return Estimate(
                 p=base.p, confidence=base.confidence,
                 model_name=self.model_name,
@@ -707,14 +743,21 @@ class CalibratedModel:
             market_p = self.market_fair.get((market_key, selection))
         if market_p is None:
             return Estimate(
-                p=base.p, confidence=base.confidence,
+                p=None,
+                confidence=base.confidence,
                 model_name=self.model_name,
                 evidence_age_s=base.evidence_age_s,
-                abstain_reason="calibration skipped: no market-implied prob available",
+                abstain_reason=(
+                    "calibration skipped: no market-implied prob available — "
+                    "an unanchored estimate is never a price"
+                ),
                 p_lower=base.p_lower, p_upper=base.p_upper,
                 diagnostics={**base.diagnostics, "shrink_pct": shrink * 100},
             )
 
+        # 2026-10-31 line of defense: the blend bar catches engineered
+        # disagreement; the confidence grade gate in the portfolio decides
+        # bettability; one position per selection stops the churn.
         calibrated_p = base.p * (1.0 - shrink) + market_p * shrink
         calibrated_p = min(1.0, max(0.0, calibrated_p))
 
@@ -747,10 +790,5 @@ class CalibratedModel:
             p_upper=_hi(calibrated_p, base.p_upper),
             p_push=base.p_push, p_half_win=base.p_half_win,
             p_half_loss=base.p_half_loss,
-            diagnostics={
-                **base.diagnostics,
-                "shrink_pct": shrink * 100,
-                "market_p": round(market_p, 4),
-                "raw_model_p": round(base.p, 4),
-            },
+            diagnostics={**base.diagnostics, "shrink_pct": shrink * 100, "market_p": round(market_p, 4)},
         )

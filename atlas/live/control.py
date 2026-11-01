@@ -129,6 +129,7 @@ def render_panel(runner: LiveRunner, now: Optional[datetime] = None) -> str:
             "settled", "arbs", "cashout_taken", "daily_pnl", "stop_active",
             "submission_enabled", "posture_mode",
             "account_balance_ngn", "page_url", "page_error", "last_error",
+            "stage", "stage_age_s",
         ):
             v = heartbeat.get(k)
             if k in ("at", "pid", "cycle_s"):
