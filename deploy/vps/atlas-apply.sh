@@ -69,7 +69,9 @@ add_file "deploy/vps/files/99-atlas-memory.conf"                "/etc/sysctl.d/9
 add_file "deploy/vps/files/logrotate-atlas"                     "/etc/logrotate.d/atlas" root 644
 add_file "deploy/vps/files/chrome-policy.json"                  "/etc/opt/chrome/policies/managed/kimi-webbridge.json" root 644
 add_file "deploy/vps/atlas_alert.py"                            "$REPO/scripts/atlas_alert.py" root 755
-add_file "deploy/vps/atlas-deploy-smoke.sh"                     "/usr/local/sbin/atlas-deploy-smoke.sh" root 755
+add_file "deploy/vps/atlas-apply.sh"                             "/usr/local/sbin/atlas-apply.sh" root 755
+add_file "deploy/vps/atlas-cd.sh"                                "/usr/local/sbin/atlas-cd.sh" root 755
+add_file "deploy/vps/atlas-deploy-smoke.sh"                      "/usr/local/sbin/atlas-deploy-smoke.sh" root 755
 
 TIMERS="atlas-backup.timer atlas-docker-prune.timer atlas-browser-recycle.timer atlas-cd.timer"
 
