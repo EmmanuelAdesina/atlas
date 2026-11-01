@@ -39,6 +39,7 @@ from atlas.live.loop import Opportunity
 from atlas.live.observe import LiveMatchState
 from atlas.live.settle import UNKNOWN, WON, settle_from_final_score
 from atlas.ops.cashout import Position, value_cashout
+from atlas.ops.campaign import UNIT_STAKE_NGN
 from atlas.ops.ledger import BetLedger
 from atlas.ops.notify import Notifier
 from atlas.ops.posture import Posture, posture_for_mode
@@ -1128,23 +1129,39 @@ class LiveRunner:
             # board-mode paths), and this is the last point before money.
             if not self.apply_policy_gates([d]) or not d.should_bet:
                 continue
-            # The operator's printed stake cap is the LAST wall. Whatever
-            # posture, saved state or sizing math produced, a stake above
-            # it never reaches the book (2026-10-28: stale state held
-            # max_stake_per_bet=100 against an explicit NGN 10 CLI).
-            if (
-                self.operator_max_stake is not None
-                and float(d.stake_ngn or 0.0) > self.operator_max_stake + 0.01
-            ):
+            # The stake wall — refusal, never resize. The OPERATOR's
+            # printed cap when the operator set one; otherwise the
+            # PRE-REGISTERED flat campaign unit. No sizing engine may
+            # resize live money in the operator's silence (2026-11-01
+            # 23:13: a Kelly path on the live loop, launched with a
+            # fantasy --bankroll 100000, staked NGN 21-27 past the NGN-10
+            # pre-registration through exactly this silence).
+            stake_cap = (
+                self.operator_max_stake
+                if self.operator_max_stake is not None
+                else UNIT_STAKE_NGN
+            )
+            if float(d.stake_ngn or 0.0) > stake_cap + 0.01:
+                unit_default = self.operator_max_stake is None
                 self.last_error = (
-                    f"stake {float(d.stake_ngn):.2f} exceeds the operator "
-                    f"cap {self.operator_max_stake:.2f} — refused"
+                    f"stake {float(d.stake_ngn):.2f} exceeds the "
+                    + (
+                        "stake cap"
+                        if unit_default
+                        else "operator cap"
+                    )
+                    + f" {stake_cap:.2f}"
+                    + (" (campaign unit)" if unit_default else "")
+                    + " — refused"
                 )
                 if self.notifier is not None:
                     self.notifier.warn(
-                        "Stake over operator cap — bet refused",
+                        "Stake over "
+                        + ("campaign unit cap" if unit_default else "operator cap")
+                        + " — bet refused",
                         f"{d.opportunity.market_key} {d.opportunity.selection} "
-                        f"stake {d.stake_ngn:.0f} > {self.operator_max_stake:.0f}",
+                        f"stake {d.stake_ngn:.0f} > {stake_cap:.0f}"
+                        + (" (campaign unit)" if unit_default else ""),
                         cycle=cycle,
                     )
                 continue

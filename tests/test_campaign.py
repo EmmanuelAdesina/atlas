@@ -241,3 +241,9 @@ def test_missing_state_file_freezes_placement(tmp_path, monkeypatch):
     bet = make_bet("b1")
     assert led.place_bet(bet) is False
     assert bet.bet_id not in led._bets
+
+
+def test_the_flat_unit_is_registered_in_code_not_in_sizing_math():
+    """The campaign is FLAT-stake: a floor AND a cap, pre-registered in
+    code. Sizing engines may never resize live money."""
+    assert campaign.UNIT_STAKE_NGN == 10.0

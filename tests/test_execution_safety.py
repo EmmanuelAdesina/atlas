@@ -84,7 +84,10 @@ class FakeSlip:
 
 
 class FakeDecision:
-    def __init__(self, odds=2.0, should_bet=True, stake=100.0, p=0.55):
+    def __init__(self, odds=2.0, should_bet=True, stake=10.0, p=0.55):
+        # stake defaults to the campaign unit: the live stake wall refuses
+        # anything above the flat NGN-10 pre-registration when the test
+        # runner carries no explicit operator cap.
         from atlas.live.loop import Opportunity
 
         self.opportunity = Opportunity(
@@ -1284,3 +1287,39 @@ def test_a_fresh_heartbeat_is_never_stomped_by_the_pulse(ledger, tmp_path):
     before = (tmp_path / "heartbeat.json").read_text(encoding="utf-8")
     runner._pulse_once()
     assert (tmp_path / "heartbeat.json").read_text(encoding="utf-8") == before
+
+
+def test_the_campaign_unit_is_the_cap_when_the_operator_is_silent(ledger):
+    """2026-11-01 23:13: a Kelly path on the live loop, launched with a
+    fantasy --bankroll 100000, staked NGN 21-27 against the NGN-10 flat
+    pre-registration — the sizing engine walked straight through the
+    operator's silence. When no explicit operator cap is set, the
+    campaign unit IS the cap: refusal, never resize."""
+    runner = LiveRunner(
+        capture=None, ledger=ledger, betslip=FakeSlip(accepted_odds=2.0),
+        allow_submission=True,
+        policy=PolicyConfig(allow_execution=True),
+    )
+    oversized = FakeDecision(odds=2.0, stake=27.0)  # the incident's biggest ticket
+    assert runner.place_bets([oversized], state(), 1) == 0
+    assert ledger.bets_for("m1") == []
+    assert runner.betslip.placed == 0, "the slip must never be touched at an off-unit stake"
+
+    at_the_unit = FakeDecision(odds=2.0, stake=10.0)
+    assert runner.place_bets([at_the_unit], state(), 2) == 1
+    assert len(ledger.bets_for("m1")) == 1
+    assert runner.betslip.placed == 1
+
+
+def test_an_explicit_operator_cap_still_governs_over_the_unit(ledger):
+    """A deliberately-set operator stake bound (the re-arm ceremony's
+    explicit CLI) remains the binding cap — the unit is the DEFAULT,
+    never a silent override of an explicit decision."""
+    runner = LiveRunner(
+        capture=None, ledger=ledger, betslip=FakeSlip(accepted_odds=2.0),
+        allow_submission=True,
+        policy=PolicyConfig(allow_execution=True),
+        operator_max_stake=50.0,
+    )
+    assert runner.place_bets([FakeDecision(odds=2.0, stake=45.0)], state(), 1) == 1
+    assert len(ledger.bets_for("m1")) == 1

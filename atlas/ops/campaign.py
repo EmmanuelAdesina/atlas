@@ -56,6 +56,16 @@ STOP_FLOOR = float(os.environ.get("ATLAS_CAMPAIGN_STOP_FLOOR", "-0.02"))
 GO_FLOOR = float(os.environ.get("ATLAS_CAMPAIGN_GO_FLOOR", "+0.02"))
 CLV_FLOOR = float(os.environ.get("ATLAS_CAMPAIGN_CLV_FLOOR", "0.0"))
 
+# The pre-registered FLAT unit of the real-money campaign: this operation
+# stakes NGN 10 flat on every gate-passing candidate — a floor AND a cap.
+# No sizing engine (Kelly or otherwise) may resize live money; on the
+# live path the runner refuses any stake above this unit when the
+# operator has not set an explicit cap (2026-11-01 23:13-23:18: a Kelly
+# path on the live loop, launched with a fantasy --bankroll 100000,
+# staked NGN 21-27 against the NGN-10 pre-registration through exactly
+# the operator's silence).
+UNIT_STAKE_NGN = float(os.environ.get("ATLAS_CAMPAIGN_UNIT_STAKE", "10.0"))
+
 # Bets placed BEFORE the full gate stack (min_ev + position cap + max_ev
 # ceiling) are a different engine; including them would grade today's
 # machine on yesterday's pathology. Cutoff: the max_ev ceiling went live
