@@ -46,7 +46,7 @@ TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
 # another queued command behind the first. On 2026-10-29 that feedback loop
 # grew the extension's queue into minutes of latency and no cycle could
 # finish. One generous timeout, no retry on timeout.
-DEFAULT_TIMEOUT_S = 45.0
+DEFAULT_TIMEOUT_S = 15.0
 
 # NEVER retried: a request that timed out may still have been executed, and a
 # second click can place a second bet or toggle a control twice. Money moves

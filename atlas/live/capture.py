@@ -309,10 +309,14 @@ class LiveCapture:
                 return
             self._loaded = False
             # 1. A light page re-registers a tab the extension stopped
-            #    answering on.
+            #    answering on. Use _evaluate (retries=0, 15s) instead of
+            #    adapter.navigate (45s default) so a slow daemon doesn't
+            #    burn the whole cycle before the while loop's deadline.
             try:
-                self.adapter.navigate(LIGHT_URL)
-            except Exception:
+                self._evaluate(
+                    f"location.href={json.dumps(LIGHT_URL)}; 1", retries=0
+                )
+            except CaptureError:
                 pass
             time.sleep(0.5 * self.pause_scale)
             # 2. Client-side hop: no load event to wait for.
