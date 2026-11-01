@@ -30,3 +30,15 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .playwright-mcp/
+
+# Operater runtime state on the VPS checkout — untracked BY DESIGN, and the
+# CD dirty-tree guard must not treat them as local modifications:
+#   live-armed      operator gate for starting the real-money loop
+#   chrome-profile/ the browser's live profile (book session)
+#   scripts/        deploy target for atlas_alert.py (applied by atlas-apply.sh)
+#   .cd-*           CD rollback state
+/live-armed
+/chrome-profile/
+/scripts/
+/.cd-backup/
+/.cd-lastgood
