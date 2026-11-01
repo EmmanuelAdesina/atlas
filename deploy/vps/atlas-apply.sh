@@ -177,6 +177,24 @@ for u in $CHANGED_UNITS; do
   restart_unit "$u"
 done
 
+# Code-only deploys do not change any unit file, but the running loop is
+# still serving the old module code from memory — restart it to actually
+# deploy (ATLAS_CD_NEED_LOOP is set by atlas-cd.sh when atlas/ tests/
+# pyproject/requirements changed). Same guards as a unit restart: armed
+# + not placement-busy; defer otherwise.
+if [ "${ATLAS_CD_NEED_LOOP:-0}" = "1" ] && [ -f "$REPO/live-armed" ]; then
+  if placement_busy && [ "${ATLAS_CD_FORCE_RESTART:-0}" != "1" ]; then
+    echo "apply: code-deploy atlas-loop restart DEFERRED (placement busy)"
+    touch "$DEFER"
+  elif systemctl is-active --quiet atlas-loop; then
+    systemctl restart atlas-loop
+    echo "apply: code deploy — restarted atlas-loop"
+    [ -f "$DEFER" ] && rm -f "$DEFER"
+  elif [ ! -f "$DEFER" ]; then
+    echo "apply: code deploy — atlas-loop not active, not starting it (operator gate owns that)"
+  fi
+fi
+
 # if a previous deploy deferred us and nothing is busy now, drain it
 if [ -f "$DEFER" ]; then
   if ! placement_busy; then
