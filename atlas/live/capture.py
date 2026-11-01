@@ -959,13 +959,16 @@ class LiveCapture:
                     if bundle and isinstance(bundle.get("rows"), int)
                     else self.board_row_count()
                 )
-                if rows > 0:
-                    return CaptureResult(
-                        False,
-                        f"on the live board ({rows} rows) — no match selected",
-                        observed_at=datetime.now(timezone.utc),
-                        match_id=self.match_id,
-                    )
+                # Always return from the board list — there are no markets to
+                # price here, so falling through to the market/state reads
+                # would loop forever past the deadline (each `continue`
+                # skips the deadline check at the bottom of the while).
+                return CaptureResult(
+                    False,
+                    f"on the live board ({rows if isinstance(rows, int) else 0} rows) — no match selected",
+                    observed_at=datetime.now(timezone.utc),
+                    match_id=self.match_id,
+                )
             # The DOM is the primary path; the snapshot is the fallback.
             # The bundle's markets part replaces read_markets_dom()'s own
             # evaluate pair (markets + team names).
