@@ -514,6 +514,24 @@ def build_app(
     return app
 
 
+def resolve_bind(
+    host: Optional[str] = None, port: Optional[int] = None
+) -> tuple[str, int]:
+    """Resolve the dashboard's actual bind address.
+
+    One resolution for every consumer — the startup banner, health
+    probes, and serve() itself — so the printed URL is always the
+    address uvicorn actually holds: explicit arguments, then ATLAS_HOST
+    / ATLAS_PORT, then the loopback defaults. Printing the unresolved
+    arguments (`http://None:None`) sent an operator to a socket that was
+    not there and cost a debugging cycle while the server was fine
+    (2026-11-02: on the VPS the deployment binds a public interface via
+    ATLAS_HOST, so loopback was the wrong probe too)."""
+    host = host or os.environ.get("ATLAS_HOST", "127.0.0.1")
+    port = int(port or os.environ.get("ATLAS_PORT", "8077"))
+    return host, port
+
+
 def serve(
     runner: LiveRunner,
     host: Optional[str] = None,
@@ -531,7 +549,6 @@ def serve(
     """
     import uvicorn
 
-    host = host or os.environ.get("ATLAS_HOST", "127.0.0.1")
-    port = int(port or os.environ.get("ATLAS_PORT", "8077"))
+    host, port = resolve_bind(host, port)
     app = build_app(runner, notifier, manual_cycles=manual_cycles)
     uvicorn.run(app, host=host, port=port, log_level="warning")

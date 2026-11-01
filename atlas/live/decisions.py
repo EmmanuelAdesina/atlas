@@ -58,6 +58,15 @@ class PolicyConfig:
     # The NGN 100 loss on 2026-10-28 (Over 1.5 @ 10.0) is the case study.
     # Raise only when the calibration record proves itself at length.
     max_bet_odds: float = 3.0
+    # Probability ceiling: no sports outcome is ever 100% certain. p >= cap
+    # means the model is miscalibrated or broken — abstain rather than bet.
+    # The Perth session saw p=1.0 claims on @13.50 and @10.00 markets that
+    # both lost. 0.95 = max 5% residual uncertainty.
+    max_p_cap: float = 0.95
+    # Market-family stop-loss: freeze a family after N consecutive losses.
+    # Prevents the 'ou_1_5 @10.00 stake=100 -> -100' pathology from
+    # repeating. 0 = disabled.
+    family_stop_loss_n: int = 3
     allow_execution: bool = False  # V1: observe + log only. No bet placement.
 
 
@@ -145,6 +154,8 @@ class DecisionLog:
     _taken: set = field(default_factory=set, repr=False)
     _exposure: dict = field(default_factory=dict, repr=False)
     _group_counts: dict = field(default_factory=dict, repr=False)
+    _family_loss_count: dict = field(default_factory=dict, repr=False)
+    _family_win_count: dict = field(default_factory=dict, repr=False)
 
     def decide(
         self,
@@ -292,6 +303,87 @@ class DecisionLog:
                 ev_lower=ev_low,
                 groups=groups,
             )
+        # --- Long-odds gate: max_bet_odds ---
+        # The NGN 100 loss on 2026-10-28 (Over 1.5 @ 10.0) proved that
+        # high-odds markets magnify model probability error. A 1% miss at
+        # odds 10 is the entire bet. Enforce hard ceiling.
+        if odds > self.policy.max_bet_odds:
+            return self._record(
+                match_id,
+                market_key,
+                selection,
+                odds,
+                est,
+                "pass",
+                f"odds {odds:.2f} > max_bet_odds {self.policy.max_bet_odds:.2f} "
+                "(long-odds gate)",
+                ev=ev,
+                ev_lower=ev_low,
+                groups=groups,
+            )
+
+        # --- Probability ceiling: max_p_cap ---
+        # No sports outcome is ever 100% certain. p >= max_p_cap means the
+        # model is miscalibrated or broken. The Perth session saw p=1.0
+        # claims on @13.50 and @10.00 markets that both lost.
+        if est.p is not None and est.p >= self.policy.max_p_cap:
+            return self._record(
+                match_id,
+                market_key,
+                selection,
+                odds,
+                est,
+                "pass",
+                f"model_p {est.p:.3f} >= max_p_cap {self.policy.max_p_cap:.2f} "
+                "(probability ceiling)",
+                ev=ev,
+                ev_lower=ev_low,
+                groups=groups,
+            )
+
+        # --- Test/debug probe filter ---
+        # The 'UNKNOWN chimera probe' entry on 2026-10-28 (@13.50, stake=10,
+        # p=1.0) was debug code that leaked to production. Reject any
+        # selection whose name looks like a probe or placeholder.
+        if selection and (
+            "chimera" in selection.lower()
+            or "probe" in selection.lower()
+            or selection.strip().upper() in {"UNKNOWN", "TEST", "DEBUG", "PLACEHOLDER"}
+        ):
+            return self._record(
+                match_id,
+                market_key,
+                selection,
+                odds,
+                est,
+                "pass",
+                f"selection '{selection}' looks like a test/debug probe — refused",
+                ev=ev,
+                ev_lower=ev_low,
+                groups=groups,
+            )
+
+        # --- Market-family stop-loss ---
+        # Freeze a market family after N consecutive settled losses. This
+        # stops the 'ou_1_5 @10.00 stake=100 -> -100' pathology from
+        # repeating. Family = first underscore segment (e.g. 'ou_3_5' -> 'ou').
+        family = market_key.split("_")[0] if "_" in market_key else market_key
+        family_losses = self._family_loss_count.get(family, 0)
+        if family_losses >= self.policy.family_stop_loss_n:
+            return self._record(
+                match_id,
+                market_key,
+                selection,
+                odds,
+                est,
+                "pass",
+                f"family '{family}' stop-loss engaged ({family_losses} "
+                f"consecutive settled losses, cap={self.policy.family_stop_loss_n})",
+                ev=ev,
+                ev_lower=ev_low,
+                groups=groups,
+            )
+
         if key in self._taken:
             return self._record(
                 match_id,
@@ -473,3 +565,32 @@ class DecisionLog:
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec.__dict__, ensure_ascii=False) + "\n")
         return rec
+
+    def register_settlement(
+        self,
+        market_key: str,
+        pnl_ngn: float,
+        won: bool,
+    ) -> None:
+        """Record a settled bet outcome for family stop-loss tracking.
+
+        Called by the settlement recon after a bet settles on the book.
+        Tracks consecutive wins/losses per market family (first underscore
+        segment of market_key, e.g. 'ou_3_5' -> 'ou'). When a family hits
+        family_stop_loss_n consecutive losses, all future bets in that
+        family are refused until a win resets the counter.
+
+        Family counters reset on a win: a single win breaks the losing
+        streak and re-arms the family.
+        """
+        family = market_key.split("_")[0] if "_" in market_key else market_key
+        if won:
+            self._family_loss_count[family] = 0
+            self._family_win_count[family] = (
+                self._family_win_count.get(family, 0) + 1
+            )
+        else:
+            self._family_loss_count[family] = (
+                self._family_loss_count.get(family, 0) + 1
+            )
+            self._family_win_count[family] = 0

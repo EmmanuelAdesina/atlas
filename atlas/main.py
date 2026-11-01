@@ -550,17 +550,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     console.print(f"Posture: {runner.posture.describe()}")
     if args.dashboard:
-        console.print(
-            f"[cyan]Control dashboard on http://{args.host}:{args.port}[/cyan]"
-        )
+        from atlas.live.control import resolve_bind
+
+        host, port = resolve_bind(args.host, args.port)
+        console.print(f"[cyan]Control dashboard on http://{host}:{port}[/cyan]")
         # The dashboard process is an OBSERVER: the trading loop owns the
         # browser tab, and a cycle in this process would navigate it behind
         # the loop's back (process-local page locks cannot see it). Manual
         # cycles are refused; POST /posture steering stays available.
         serve(
             runner,
-            host=args.host,
-            port=args.port,
+            host=host,
+            port=port,
             notifier=notifier,
             manual_cycles=False,
         )

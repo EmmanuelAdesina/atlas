@@ -1,0 +1,15 @@
+[Unit]
+Description=ATLAS Bet History settlement (scrape the book truth, reconcile ledger)
+After=network-online.target atlas-browser.service
+Wants=network-online.target
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/atlas
+ExecStart=/opt/atlas/.venv/bin/python -m atlas.ops.settle_history
+Nice=5
+TimeoutStartSec=900
+FailureAction=none
+StandardOutput=journal
+StandardError=journal
+[Install]
+WantedBy=multi-user.target

@@ -27,6 +27,19 @@ alert() {
 
 g() { cd "$REPO" && sudo -u reliastra git "$@"; }
 
+# MONEY FLOOR (2026-11-02). A rollback target that predates the
+# fail-closed campaign verdict and the flat NGN-10 unit cap would retire
+# the live-money refusal walls while the operator still believes walls
+# are deployed — 2026-11-02 00:20/00:35, a smoke timeout (the old smoke
+# required the loop to be RUNNING while money was deliberately
+# disarmed) rolled the tree back to 99f3954, several walls earlier in
+# history. A backward move past a money wall is never a deploy
+# judgment; it needs the operator's explicit bypass.
+money_walls_present() {
+  g show "$1":atlas/ops/campaign.py 2>/dev/null | grep -q UNIT_STAKE_NGN \
+    && g show "$1":atlas/ops/campaign.py 2>/dev/null | grep -q '"proven"'
+}
+
 # ---- fetch -----------------------------------------------------------------
 if ! g fetch -q origin main; then
   log "git fetch origin/main FAILED (exit $?)"
@@ -89,32 +102,55 @@ fi
 # ---- apply + smoke ---------------------------------------------------------
 if ! /usr/local/sbin/atlas-apply.sh; then
   APPLY_RC=$?
-  log "atlas-apply.sh EXIT $APPLY_RC — rolling back"
-  if [ -n "$LASTGOOD" ]; then
-    g reset --hard "$LASTGOOD" >/dev/null 2>&1 && log "rolled back to $LASTGOOD"
+  log "atlas-apply.sh EXIT $APPLY_RC"
+  if [ -n "$LASTGOOD" ] && money_walls_present "$LASTGOOD"; then
+    if g reset --hard "$LASTGOOD" >/dev/null 2>&1; then
+      log "rolled back to $LASTGOOD"
+    fi
+    alert "ATLAS CD: apply failed, rollback executed" \
+      "apply.sh exited $APPLY_RC; repo reset to last-known-good $LASTGOOD. Check atlas-cd journal for the step that failed."
+  else
+    log "MONEY FLOOR: rollback target ${LASTGOOD:-unset} predates the fail-closed campaign + flat-unit walls — refusing rollback; /opt/atlas stays on $REMOTE"
+    alert "ATLAS CD: apply failed — rollback REFUSED (money floor)" \
+      "apply.sh exited $APPLY_RC. .cd-lastgood (${LASTGOOD:-unset}) predates the money walls; refused to roll /opt/atlas backward past them. The tree stays on $REMOTE — money stays frozen at the walls regardless; investigate manually."
   fi
-  alert "ATLAS CD: apply failed, rollback executed" \
-    "apply.sh exited $APPLY_RC; repo reset to last-known-good ${LASTGOOD:-unknown}. Check atlas-cd journal for the step that failed."
   exit 1
 fi
 
 if ! timeout "${ATLAS_CD_SMOKE_S:-330}" /usr/local/sbin/atlas-deploy-smoke.sh; then
   RC=$?
-  log "SMOKE FAILED (exit $RC) — rolling back to $LASTGOOD"
-  if [ -n "$LASTGOOD" ]; then
-    g reset --hard "$LASTGOOD" >/dev/null 2>&1 && log "code rolled back to $LASTGOOD"
-    # restore unit/config backups taken by apply
-    LATEST_BK=$(ls -1dt "$REPO"/.cd-backup/*/ 2>/dev/null | head -1)
-    if [ -n "$LATEST_BK" ]; then
-      cp -p "$LATEST_BK"* /etc/systemd/system/ 2>/dev/null || true
-      cp -p "$LATEST_BK"* /usr/local/sbin/ 2>/dev/null || true
-      systemctl daemon-reload 2>/dev/null || true
-      systemctl restart atlas-loop 2>/dev/null || true
-      log "restored system config from $LATEST_BK"
+  log "SMOKE FAILED (exit $RC)"
+  if [ -n "$LASTGOOD" ] && money_walls_present "$LASTGOOD"; then
+    if g reset --hard "$LASTGOOD" >/dev/null 2>&1; then
+      log "code rolled back to $LASTGOOD"
+      # restore unit/config backups taken by apply
+      LATEST_BK=$(ls -1dt "$REPO"/.cd-backup/*/ 2>/dev/null | head -1)
+      if [ -n "$LATEST_BK" ]; then
+        cp -p "$LATEST_BK"* /etc/systemd/system/ 2>/dev/null || true
+        cp -p "$LATEST_BK"* /usr/local/sbin/ 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+        # MONEY GATE: never (re)start the trading loop when the operator
+        # has disarmed money — the rollback path honors the same gate as
+        # atlas-apply.sh's restart guards (2026-11-02: this rollback
+        # used to restart atlas-loop unguarded; only the unit's
+        # ConditionPathExists stopped an armed start into restored old
+        # config).
+        if [ -f "${ATLAS_CD_ARM_FLAG:-/opt/atlas/live-armed}" ]; then
+          systemctl restart atlas-loop 2>/dev/null || true
+        else
+          log "config restored; atlas-loop stays down (arm flag absent — the operator gate owns it)"
+        fi
+        systemctl restart atlas-dashboard 2>/dev/null || true
+        log "restored system config from $LATEST_BK"
+      fi
     fi
+    alert "ATLAS CD: deploy SMOKE FAILED — ROLLED BACK" \
+      "Commit $REMOTE failed health checks (exit $RC); repo and config restored to $LASTGOOD. Atlas keeps running the previous version. Investigate before re-merging."
+  else
+    log "MONEY FLOOR: rollback target ${LASTGOOD:-unset} predates the fail-closed campaign + flat-unit walls — refusing rollback; keeping $REMOTE"
+    alert "ATLAS CD: deploy SMOKE FAILED — rollback REFUSED (money floor)" \
+      "Commit $REMOTE failed health checks (exit $RC). .cd-lastgood (${LASTGOOD:-unset}) predates the money walls; refused to roll /opt/atlas backward past them. The tree stays on $REMOTE — money is still frozen at the walls; verify the new tree's health manually."
   fi
-  alert "ATLAS CD: deploy SMOKE FAILED — ROLLED BACK" \
-    "Commit $REMOTE failed health checks (exit $RC); repo and config restored to $LASTGOOD. Atlas keeps running the previous version. Investigate before re-merging."
   exit 1
 fi
 
