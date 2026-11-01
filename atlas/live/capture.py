@@ -308,24 +308,29 @@ class LiveCapture:
                 self.ensure_multi_view()
                 return
             self._loaded = False
+            # load_board has its own deadline so a slow daemon can't burn
+            # the entire capture cycle before the while loop's deadline.
+            lb_deadline = time.monotonic() + 30.0
             # 1. A light page re-registers a tab the extension stopped
             #    answering on. Use _evaluate (retries=0, 15s) instead of
-            #    adapter.navigate (45s default) so a slow daemon doesn't
-            #    burn the whole cycle before the while loop's deadline.
-            try:
-                self._evaluate(
-                    f"location.href={json.dumps(LIGHT_URL)}; 1", retries=0
-                )
-            except CaptureError:
-                pass
+            #    adapter.navigate (45s default).
+            if time.monotonic() < lb_deadline:
+                try:
+                    self._evaluate(
+                        f"location.href={json.dumps(LIGHT_URL)}; 1", retries=0
+                    )
+                except CaptureError:
+                    pass
             time.sleep(0.5 * self.pause_scale)
             # 2. Client-side hop: no load event to wait for.
-            try:
-                self._evaluate(f"location.href={json.dumps(self.url)}; 1")
-            except CaptureError:
-                pass
-            arrived = self._wait_until(self._on_board_list, 8.0)
-            if not arrived:
+            if time.monotonic() < lb_deadline:
+                try:
+                    self._evaluate(f"location.href={json.dumps(self.url)}; 1", retries=0)
+                except CaptureError:
+                    pass
+            remaining = max(0.0, lb_deadline - time.monotonic())
+            arrived = self._wait_until(self._on_board_list, min(8.0, remaining))
+            if not arrived and time.monotonic() < lb_deadline:
                 # A crashed renderer cannot run the client-side hop; CDP is
                 # handled by the browser process and still can.
                 cdp = getattr(self.adapter, "cdp", None)
@@ -337,18 +342,22 @@ class LiveCapture:
                     time.sleep(0.5 * self.pause_scale)
                     try:
                         self._evaluate(
-                            f"location.href={json.dumps(self.url)}; 1"
+                            f"location.href={json.dumps(self.url)}; 1", retries=0
                         )
                     except CaptureError:
                         pass
-                    arrived = self._wait_until(self._on_board_list, 8.0)
-            if not arrived:
+                    remaining = max(0.0, lb_deadline - time.monotonic())
+                    if remaining > 0:
+                        arrived = self._wait_until(self._on_board_list, min(8.0, remaining))
+            if not arrived and time.monotonic() < lb_deadline:
                 # The SPA router sometimes needs a reload to mount the list.
                 try:
-                    self._evaluate("location.reload(); 1")
+                    self._evaluate("location.reload(); 1", retries=0)
                 except CaptureError:
                     pass
-                arrived = self._wait_until(self._on_board_list, 6.0)
+                remaining = max(0.0, lb_deadline - time.monotonic())
+                if remaining > 0:
+                    arrived = self._wait_until(self._on_board_list, min(6.0, remaining))
             if arrived and self.board_row_count() == 0:
                 # The list mounted but is still filling in: the board's own
                 # data lags the route, and a reload populates it.
