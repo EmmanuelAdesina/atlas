@@ -1001,6 +1001,8 @@ class LiveCapture:
                         recovered = True
                         self.recover()
                     time.sleep(self.poll_s)
+                    if time.monotonic() >= deadline:
+                        return CaptureResult(False, reason, match_id=self.match_id)
                     continue
                 markets = extract_markets(texts, self.match_id)
                 if not markets:
