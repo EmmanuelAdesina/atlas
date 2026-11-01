@@ -134,7 +134,7 @@ class LiveCapture:
                 return raw["data"]
         return raw
 
-    def _evaluate(self, code: str, retries: int = 2) -> Any:
+    def _evaluate(self, code: str, retries: int = 0) -> Any:
         last: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
