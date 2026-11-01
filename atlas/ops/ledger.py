@@ -53,6 +53,13 @@ class BetRecord:
     # for bets whose receipt was read normally.
     receipt: Optional[str] = None
     odds_source: Optional[str] = None
+    # Real-world match identity, for the joins the match_id field cannot
+    # serve: match_id stays the in-process placement key ('live') so
+    # settlement-by-match keeps working, while match_label/event_id carry
+    # what the decision log and Bet History need to reconcile bets to
+    # results (2026-11-01 audit: 73/80 ledger bets were join-impossible).
+    match_label: Optional[str] = None
+    event_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -311,6 +318,8 @@ class BetLedger:
             p_lower=bet.get("p_lower"),
             ev=float(bet.get("ev", 0.0) or 0.0),
             confidence=str(bet.get("confidence", "unknown")),
+            match_label=bet.get("match_label"),
+            event_id=bet.get("event_id"),
             correlation_groups=list(bet.get("correlation_groups", [])),
             receipt=bet.get("receipt"),
             odds_source=bet.get("odds_source"),

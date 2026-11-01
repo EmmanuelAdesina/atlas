@@ -19,8 +19,12 @@ the losing side, MIN_N 100 settled bets, GO threshold +2% per bet (the
 realistic going edge after the margin; anything smaller cannot pay for
 execution slippage). The verdict is written to
 data/ops/campaign_state.json; `BetLedger.is_campaign_frozen()` reads it
-and refuses placements while the action is 'observe' — the freeze is
-enforced at the LAST wall before money, exactly like the daily stop.
+and enforces it at the LAST wall before money, exactly like the daily
+stop. 2026-11-01: the wall is FAIL-CLOSED — every action other than
+'proven' (collect / watch / observe) and a missing/unreadable state
+file all freeze real-money placement. Under the old explicitly-open
+rule this session placed real NGN bets at collect n=0; the collect-
+phase evidence now lives in the paper stream instead.
 """
 from __future__ import annotations
 
@@ -215,9 +219,19 @@ def refresh_state_file(ledger) -> dict:
 
 
 def frozen() -> bool:
-    """True while the persisted verdict froze real-money placement."""
+    """FAIL-CLOSED: real money requires the verdict to say 'proven'.
+
+    Missing state, unparsable state, and every action other than 'proven'
+    (collect / watch / observe) freeze real-money placement. This is the
+    2026-11-01 inversion of the original explicitly-open rule (frozen only
+    on 'observe' — open through the entire collection phase by
+    construction, which is how this session spent real money at collect
+    n=0). Under observe-first, the collect-phase evidence is the paper
+    stream; the paper-verdict engine that can honestly produce 'proven'
+    from reconciled paper outcomes is the component that re-opens money.
+    """
     try:
         v = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        return v.get("action") == "observe"
     except (OSError, json.JSONDecodeError):
-        return False
+        return True
+    return v.get("action") != "proven"

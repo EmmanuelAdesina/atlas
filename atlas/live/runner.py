@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -208,6 +209,10 @@ class LiveRunner:
         # half-time) must not be re-tried every cycle. 2026-10-29: 8 of 10
         # placement attempts burned on the same two O/U lines at HT.
         self._avoid: dict[tuple[str, str, str], float] = {}
+        # Per-cycle match identity for attestations (placement records,
+        # decision rows); None until the cycle computes it.
+        self._cycle_match_label: Optional[str] = None
+        self._cycle_event_id: Optional[str] = None
         self._last_avoided: Optional[str] = None
         # Balance-vs-ledger guard: the capture reads the account balance each
         # ready cycle. A balance DROP right after an unconfirmed placement is
@@ -465,6 +470,7 @@ class LiveRunner:
         """Append this cycle's decisions to the audit log."""
         if self.decision_log_path is None:
             return
+        match_label, event_id = self._match_identity()
         try:
             path = Path(self.decision_log_path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -483,6 +489,13 @@ class LiveRunner:
                                 "ev": d.opportunity.ev,
                                 "ev_lower": d.opportunity.ev_lower,
                                 "stake_ngn": d.stake_ngn,
+                                # Audit-grade identity + grade: every row is
+                                # now joinable to its real match (label +
+                                # event id from the URL) and carries the
+                                # confidence the model claimed at pricing.
+                                "confidence": d.opportunity.model_confidence,
+                                "match_label": match_label,
+                                "event_id": event_id,
                                 "decision": d.decision,
                                 "reason": d.reason,
                             },
@@ -928,11 +941,38 @@ class LiveRunner:
                     cycle=cycle,
                 )
             return 0
+        # Match identity, computed once per cycle: every attestation
+        # written below (placement records, decision rows) joins on
+        # these two fields.
+        self._cycle_match_label, self._cycle_event_id = self._match_identity()
         try:
             placed = self._place_bets_locked(decisions, state, cycle)
         finally:
             self._page_lock.release()
         return placed
+
+    def _match_identity(self) -> tuple[Optional[str], Optional[str]]:
+        """(match_label, event_id) from the live page URL, else (None, None).
+
+        The capture session is permanently match_id='live' (the in-process
+        placement key), which made ledger bets join-impossible to their
+        real matches (2026-11-01 audit: 73/80 ledger rows read
+        'match_id: live'). SportyBet's own URL carries what both the book
+        and the decision log need:
+            .../live/<Country>/<League>/<H>_vs_<A>/sr:match:<id>
+        Anything that fails to parse keeps both None — additive evidence,
+        never a placement blocker.
+        """
+        url = str(getattr(self.capture, "last_href", "") or "")
+        m = re.search(r"/([A-Za-z0-9_]+)_vs_([A-Za-z0-9_]+)/", url)
+        label = None
+        if m:
+            label = (
+                f"{m.group(1).replace('_', ' ')} vs "
+                f"{m.group(2).replace('_', ' ')}"
+            )
+        event_m = re.search(r"(sr:match:\d+)", url)
+        return label, (event_m.group(1) if event_m else None)
 
     def _avoid_key(self, state, d) -> tuple[str, str, str]:
         """Identity of a refusable bet: match + market + selection."""
@@ -1312,6 +1352,8 @@ class LiveRunner:
                     self._arm_unconfirmed_probe(
                         {
                             "match_id": state.match_id,
+                            "match_label": self._cycle_match_label,
+                            "event_id": self._cycle_event_id,
                             "market_key": d.opportunity.market_key,
                             "market_label": label,
                             "selection": d.opportunity.selection,
@@ -1348,6 +1390,8 @@ class LiveRunner:
                 self.ledger.record_pending(
                     {
                         "match_id": state.match_id,
+                        "match_label": self._cycle_match_label,
+                        "event_id": self._cycle_event_id,
                         "market_key": d.opportunity.market_key,
                         "market_label": label,
                         "selection": d.opportunity.selection,

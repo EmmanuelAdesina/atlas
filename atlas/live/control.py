@@ -23,7 +23,7 @@ import json
 import os
 import pathlib
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -36,6 +36,17 @@ from atlas.ops.posture import propose_posture
 
 DECISIONS_LOG = pathlib.Path("data/decisions/loop_decisions.jsonl")
 NOTIFICATIONS_LOG = pathlib.Path("data/decisions/notifications.jsonl")
+
+# The operator's structural money gate: the systemd loop unit carries
+# ConditionPathExists on this file, and its presence is one of the four
+# gates computed into the /status submission verdict. Env-overridable so
+# tests and second checkouts can point it anywhere.
+ARM_FLAG_PATH = pathlib.Path(
+    os.environ.get("ATLAS_ARM_FLAG", "/opt/atlas/live-armed")
+)
+# A heartbeat older than this is a dead loop's last word, not a live
+# claim: 3 cycles at the configured 30s cadence.
+HEARTBEAT_STALE_S = 90.0
 
 
 def _tail_lines(path: pathlib.Path, n: int) -> list[str]:
@@ -355,28 +366,106 @@ def build_app(
     def status() -> dict:
         # The dashboard is a separate process from the live loop, so mirror
         # the on-disk truth: the loop's ledger and its persisted posture.
-        # The heartbeat file is the source of truth for the loop's live
-        # state; the dashboard's own runner is just a reader.
+        # The heartbeat file is the loop's record of its live state; the
+        # dashboard's own runner is just a reader.
+        #
+        # BUT a heartbeat is written by the loop and only by the loop: a
+        # dead loop leaves its last heartbeat claiming submission_enabled
+        # forever, and the 2026-11-01 audit caught the panel showing a
+        # live, armed operation while the loop had been stopped and
+        # disarmed for 15+ minutes. So the money question — CAN THIS
+        # PLACE A BET RIGHT NOW — is COMPUTED from fresh evidence on every
+        # request: heartbeat freshness, the heartbeat's own submission
+        # claim, the on-disk arm flag, and the campaign verdict. No single
+        # stale file can answer "yes" alone.
         runner.ledger.refresh()
         runner.load_state()
         ledger = runner.ledger
         last = runner.reports[-1] if runner.reports else None
         heartbeat = _read_heartbeat(runner)
         hb = heartbeat or {}
+        now = datetime.now(timezone.utc)
+
+        hb_at = None
+        try:
+            hb_at = datetime.fromisoformat(str(hb.get("at")))
+        except (TypeError, ValueError):
+            hb_at = None
+        if hb_at is not None and hb_at.tzinfo is None:
+            hb_at = hb_at.replace(tzinfo=timezone.utc)
+        heartbeat_age_s = (
+            None if hb_at is None else max(0.0, (now - hb_at).total_seconds())
+        )
+        heartbeat_fresh = (
+            heartbeat_age_s is not None and heartbeat_age_s <= HEARTBEAT_STALE_S
+        )
+        arm_flag_present = ARM_FLAG_PATH.exists()
+        campaign_frozen = ledger.is_campaign_frozen()
+
+        # A closed gate closes submission; the reason list is the
+        # operator-readable why.
+        closed = []
+        if hb_at is None:
+            closed.append("heartbeat_missing")
+        elif not heartbeat_fresh:
+            closed.append(f"heartbeat_stale_{int(heartbeat_age_s)}s")
+        if not hb.get("submission_enabled", False):
+            closed.append("heartbeat_not_submitting")
+        if not arm_flag_present:
+            closed.append(f"arm_flag_absent:{ARM_FLAG_PATH}")
+        if campaign_frozen:
+            closed.append("campaign_frozen")
+
+        # Exposure honesty: the ledger's 'open' set accumulates bets the
+        # reconciler never revisited. Bets from the last 24h may genuinely
+        # be in flight; anything older is by definition a position whose
+        # match has finished and whose result was never written back — a
+        # stale record, not live risk. Report both, never a blur (audit
+        # M2: 710 reported while ~30 was the recent commitment).
+        cutoff = now - timedelta(hours=24)
+        open_recent = open_unreconciled = 0.0
+        for b in ledger.open_bets():
+            placed = None
+            try:
+                placed = datetime.fromisoformat(str(b.get("placed_at")))
+            except (TypeError, ValueError):
+                placed = None
+            if placed is not None and placed.tzinfo is None:
+                placed = placed.replace(tzinfo=timezone.utc)
+            stake = float(b.get("stake_ngn", 0.0) or 0.0)
+            if placed is not None and placed >= cutoff:
+                open_recent += stake
+            else:
+                open_unreconciled += stake
+
         return {
-            "at": datetime.now(timezone.utc).isoformat(),
+            "at": now.isoformat(),
             "cycle": hb.get("cycle", runner.cycle),
             "posture": runner.posture.to_dict(),
             "daily_pnl_ngn": ledger.daily_pnl(),
             "daily_stop_active": ledger.is_daily_stop_active(),
-            "open_exposure_ngn": sum(
-                b.get("stake_ngn", 0.0)
-                for b in ledger.open_bets()
-            ),
+            "open_exposure_ngn": open_recent + open_unreconciled,
+            "exposure_split": {
+                # stake placed in the last 24h vs stake placed earlier and
+                # never reconciled (match long over)
+                "open_recent_ngn": round(open_recent, 2),
+                "open_unreconciled_ngn": round(open_unreconciled, 2),
+            },
             "bets": len(ledger.all_bets()),
-            "submission_enabled": hb.get(
-                "submission_enabled", runner.allow_submission
+            "loop_alive": heartbeat_fresh,
+            "heartbeat_age_s": (
+                None if heartbeat_age_s is None else round(heartbeat_age_s, 1)
             ),
+            "arm_flag_path": str(ARM_FLAG_PATH),
+            "arm_flag_present": arm_flag_present,
+            "campaign_frozen": campaign_frozen,
+            "submission_enabled": not closed,
+            "submission_basis": closed or [
+                "heartbeat_fresh",
+                "heartbeat_submitting",
+                "arm_flag_present",
+                "campaign_open",
+            ],
             # Async placement: the cycle no longer waits for the book, so
             # this object is how a client sees queued/reserved/in-flight
             # bets without reading the heartbeat file itself.

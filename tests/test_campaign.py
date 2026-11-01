@@ -129,22 +129,28 @@ def test_proven_with_clv(tmp_path, monkeypatch):
     assert v["clv_pct"] == 0.0
 
 
-def test_state_file_roundtrip_and_frozen(tmp_path, monkeypatch):
+def test_frozen_is_fail_closed_on_any_non_proven_state(tmp_path, monkeypatch):
+    """MISSING / UNREADABLE / collect / watch / observe — every state that
+    is not an explicit 'proven' verdict freezes real money. The old
+    explicitly-open rule is how this session bet real NGN at collect
+    n=0; this test pins the inversion."""
     monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
-    assert campaign.frozen() is False  # missing file is never a freeze
+    assert campaign.frozen() is True  # missing file
+    campaign.STATE_FILE.write_text("{not json", encoding="utf-8")
+    assert campaign.frozen() is True  # unreadable file
+    for action in ("collect", "watch", "observe"):
+        campaign.STATE_FILE.write_text(
+            json.dumps({"action": action}), encoding="utf-8"
+        )
+        assert campaign.frozen() is True, action
     campaign.STATE_FILE.write_text(
-        json.dumps({"action": "observe"}), encoding="utf-8"
+        json.dumps({"action": "proven"}), encoding="utf-8"
     )
-    assert campaign.frozen() is True
-    campaign.STATE_FILE.write_text(
-        json.dumps({"action": "watch"}), encoding="utf-8"
-    )
-    assert campaign.frozen() is False
+    assert campaign.frozen() is False  # the only open state
 
-    # refresh_state_file with a non-frozen state -> collect
-    campaign.STATE_FILE.write_text(
-        json.dumps({"action": "watch"}), encoding="utf-8"
-    )
+
+def test_refresh_state_file_below_min_n_returns_collect(tmp_path, monkeypatch):
+    monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
     refresh_v = campaign.refresh_state_file(
         make_ledger_with(tmp_path / "led", [-10.0] * 5)
     )
@@ -176,17 +182,42 @@ def test_ledger_refuses_placement_when_frozen(tmp_path, monkeypatch):
     assert bet.bet_id not in led._bets  # journaled, never a live position
 
 
-def test_ledger_allows_placement_when_verdict_watch(tmp_path, monkeypatch):
+def test_ledger_refuses_placement_when_verdict_watch(tmp_path, monkeypatch):
+    """FAIL-CLOSED: under the old rule 'watch' traded real money while
+    collecting; under the inversion only 'proven' trades. Collect-phase
+    evidence is the paper stream, not the wallet."""
     monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
     campaign.STATE_FILE.write_text(
         json.dumps({"action": "watch"}), encoding="utf-8"
+    )
+    led = BetLedger(LedgerConfig(), log_path=str(tmp_path / "l.jsonl"))
+    assert led.can_place_bet(10.0) is False
+    bet = make_bet("b1")
+    assert led.place_bet(bet) is False
+    assert bet.bet_id not in led._bets
+
+
+def test_ledger_allows_placement_when_proven(tmp_path, monkeypatch):
+    """The only state that opens the wall: the pre-registered verdict
+    reads 'proven' — edge confirmed at the MIN_N bar."""
+    monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
+    campaign.STATE_FILE.write_text(
+        json.dumps({"action": "proven"}), encoding="utf-8"
     )
     led = BetLedger(LedgerConfig(), log_path=str(tmp_path / "l.jsonl"))
     assert led.can_place_bet(10.0) is True
     assert led.place_bet(make_bet("b1")) is True
 
 
-def test_missing_state_file_never_freezes(tmp_path):
+def test_missing_state_file_freezes_placement(tmp_path, monkeypatch):
+    """Fail-closed on the ledger wall too: no campaign state file means
+    the wall is SHUT, not open."""
+    monkeypatch.setattr(
+        campaign, "STATE_FILE", tmp_path / "absent-state.json"
+    )
     led = BetLedger(LedgerConfig(), log_path=str(tmp_path / "l.jsonl"))
     led.config.daily_loss_limit = -10_000  # isolate the campaign gate
-    assert led.can_place_bet(10.0) is True
+    assert led.can_place_bet(10.0) is False
+    bet = make_bet("b1")
+    assert led.place_bet(bet) is False
+    assert bet.bet_id not in led._bets

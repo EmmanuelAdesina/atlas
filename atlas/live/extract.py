@@ -484,6 +484,17 @@ def _post_process_markets(markets: list[dict]) -> list[dict]:
                 continue
             line_txt = ("%g" % line).replace(".", "_")
             m["market_key"] = key[: -len("_pending")] + f"_{line_txt}"
+    # Suspended placeholders: a key still ending '_pending' is the book's
+    # pre-line placeholder ('2nd Half - Asian Handicap' before the half
+    # exists) whose displayed price is not a settable quote. Priced anyway
+    # they produced the 2026-11-01 'ah_2h_pending model_p 1.000' certainty
+    # churn — dozens of refusal lines per cycle, every cycle. When a true
+    # line exists the resolution above renames the key; anything left
+    # pending at the end of normalization has no tradable line — drop it.
+    cleaned = [
+        m for m in cleaned
+        if not str(m.get("market_key") or "").endswith("_pending")
+    ]
     return cleaned
 
 

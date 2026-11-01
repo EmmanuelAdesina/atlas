@@ -10,7 +10,11 @@ import pytest
 from datetime import datetime, timezone
 
 from atlas.live.estimate import LiveStateSpaceModel
-from atlas.live.extract import extract_clock_score, extract_score_from_dom
+from atlas.live.extract import (
+    _post_process_markets,
+    extract_clock_score,
+    extract_score_from_dom,
+)
 from atlas.live.observe import LiveMatchState, TeamStats
 from atlas.live.math_engine import price_from_joint_matrix, compute_matrix_marginals
 
@@ -295,3 +299,42 @@ def test_rest_of_match_is_used_when_the_score_is_level():
     # Shrunk toward the rest-of-match prior, which is between the model's
     # own probability and the market's.
     assert est.p != full["Home"]
+
+
+# --- suspended placeholders -------------------------------------------------
+
+def test_post_process_drops_unresolved_pending_only():
+    """A key still ending '_pending' at the end of normalization is the
+    book's pre-line placeholder (e.g. '2nd Half - Asian Handicap' before
+    the half exists), whose displayed price is not a settable quote.
+    Priced anyway it produced the 2026-11-01 'ah_2h_pending model_p
+    1.000' refusal churn — dozens of lines per cycle, every cycle. A
+    pending key with a real line gets renamed by resolution; anything
+    left pending at the single choke point both extraction paths share
+    is dropped."""
+    resolved = {
+        "match_id": "live",
+        "market_key": "home_ou_pending",
+        "market_label": "Home Team Over/Under",
+        "line": 2.5,
+        "selections": [{"name": "Over 2.5", "odd": "1.90"}],
+    }
+    unresolved = {
+        "match_id": "live",
+        "market_key": "ah_2h_pending",
+        "market_label": "2nd Half - Asian Handicap",
+        "selections": [{"name": "Home (-0.5)", "odd": "1.90"}],
+    }
+    normal = {
+        "match_id": "live",
+        "market_key": "ou_2_5",
+        "market_label": "Over/Under",
+        "selections": [{"name": "Over 2.5", "odd": "1.83"}],
+    }
+    keys = [
+        m["market_key"]
+        for m in _post_process_markets([resolved, unresolved, normal])
+    ]
+    assert "home_ou_2_5" in keys        # pending resolved on a real line: kept
+    assert "ah_2h_pending" not in keys  # pre-line placeholder: dropped
+    assert "ou_2_5" in keys             # normal key untouched
