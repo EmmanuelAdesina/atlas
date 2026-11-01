@@ -926,6 +926,18 @@ class LiveCapture:
         if not self.board_loaded():
             self.load_board()
         while True:
+            # Deadline checked at the TOP of the loop (not just the
+            # bottom), because a single _evaluate with retries can burn
+            # the entire max_wait_s budget (3 attempts × 15s = 45s)
+            # before we ever reach the bottom check.
+            if time.monotonic() >= deadline:
+                return CaptureResult(
+                    False,
+                    f"capture deadline ({self.max_wait_s}s) exceeded — "
+                    f"last stage: {reason}",
+                    observed_at=datetime.now(timezone.utc),
+                    match_id=self.match_id,
+                )
             # ONE batched evaluate covers every steady-path read (2026-11-01:
             # the market read, team names, rows, scoreboard and state
             # re-reads were 5-6 sequential round-trips per iteration; the
