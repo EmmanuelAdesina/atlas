@@ -45,6 +45,14 @@ class BetRecord:
     settle_ngn: Optional[float] = None
     book_status: Optional[str] = None
     settle_source: Optional[str] = None
+    # Placement verification caveat: 'balance_delta' marks a bet recorded
+    # WITHOUT the book's receipt (Submission Successful) — the account
+    # dropped by exactly the planned stake shortly after the submission
+    # (2026-11-01 13:30/13:33). The final ticket odds then live on the
+    # book's Bet History, signalled by odds_source='priced'. Both are None
+    # for bets whose receipt was read normally.
+    receipt: Optional[str] = None
+    odds_source: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -279,6 +287,8 @@ class BetLedger:
             ev=float(bet.get("ev", 0.0) or 0.0),
             confidence=str(bet.get("confidence", "unknown")),
             correlation_groups=list(bet.get("correlation_groups", [])),
+            receipt=bet.get("receipt"),
+            odds_source=bet.get("odds_source"),
         )
         return self.place_bet(rec)
 

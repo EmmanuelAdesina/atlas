@@ -888,6 +888,45 @@ class BetslipDriver:
             return {"ok": False, "error": "slip is in SIM (simulation) mode"}
         return {"ok": True, "mode": "REAL" if slip.selections else "unknown"}
 
+    def _await_receipt(self, deadline: float, started: float) -> tuple[bool, Any, str]:
+        """Poll the book for the placement verdict until `deadline`.
+
+        A read failure under load must NOT abort the verification: the bet
+        may already be on the book, and declaring it unconfirmed leaves real
+        money outside the ledger (2026-11-01 13:27: a ReadTimeout mid-poll
+        produced exactly that). Keep polling — a slow renderer cannot turn a
+        placed bet into an invisible one.
+        """
+        error = "the slip did not confirm after Confirm"
+        placed = False
+        booking: Any = None
+        while time.monotonic() < deadline:
+            try:
+                state = self.slip_state()
+            except Exception:
+                time.sleep(0.5)
+                continue
+            if state.get("insufficient"):
+                # The book REFUSED the submission on funds (dialog). Not a
+                # placed bet, and waiting longer cannot change it.
+                error = (
+                    "the book reported insufficient balance for this slip "
+                    "(stake blended above plan, or the balance is stale)"
+                )
+                break
+            if state.get("receipt"):
+                placed = True
+                booking = state.get("booking")
+                break
+            if state.get("empty"):
+                placed = True
+                break
+            # The receipt normally lands in under a second; poll fast at
+            # first, then back off so a slow book is still waited out
+            # without 24 fixed half-second sleeps.
+            time.sleep(0.1 if time.monotonic() - started < 2.0 else 0.25)
+        return placed, booking, error
+
     def place_bet(self) -> dict:
         """Submit the slip. Requires an explicit opt-in at construction.
 
@@ -931,32 +970,8 @@ class BetslipDriver:
         # this UI build, leaves the placement receipt ('Submission Successful
         # | Total Stake | Booking Code'). The receipt is the stronger and
         # observed-on-live-book signal; the empty slip is the older shape.
-        placed = False
-        booking = None
-        error = "the slip did not confirm after Confirm"
         started = time.monotonic()
-        deadline = started + 12.0
-        while time.monotonic() < deadline:
-            state = self.slip_state()
-            if state.get("insufficient"):
-                # The book REFUSED the submission on funds (dialog). Not a
-                # placed bet, and waiting longer cannot change it.
-                error = (
-                    "the book reported insufficient balance for this slip "
-                    "(stake blended above plan, or the balance is stale)"
-                )
-                break
-            if state.get("receipt"):
-                placed = True
-                booking = state.get("booking")
-                break
-            if state.get("empty"):
-                placed = True
-                break
-            # The receipt normally lands in under a second; poll fast at
-            # first, then back off so a slow book is still waited out
-            # without 24 fixed half-second sleeps.
-            time.sleep(0.1 if time.monotonic() - started < 2.0 else 0.25)
+        placed, booking, error = self._await_receipt(started + 25.0, started)
         for attr in ("data-atlas-place-bet", "data-atlas-confirm"):
             try:
                 self._evaluate(
@@ -980,3 +995,24 @@ class BetslipDriver:
             "booking": booking,
             "error": None if placed else error,
         }
+
+    def dismiss_receipt(self) -> bool:
+        """Acknowledge the placement receipt with a REAL click on its OK.
+
+        The book keeps the 'Submission Successful' modal up until it is
+        acknowledged; while it is up, read_slip() returns receipt text that
+        cannot name its own contents, and the runner's identity gate turns a
+        fresh attempt into a fake mismatch (2026-11-01 13:29). This click
+        acknowledges money ALREADY placed — it cannot place, cancel, or move
+        anything. Observer drivers never reach here (money tool gate).
+        """
+        if not self.allow_submit:
+            return False
+        try:
+            marked = self._real_click(JS_DISMISS_RECEIPT, "receipt OK")
+            if marked.get("ok"):
+                time.sleep(0.5)
+                return True
+        except Exception:
+            pass
+        return False

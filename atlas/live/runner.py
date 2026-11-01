@@ -217,6 +217,9 @@ class LiveRunner:
         # armed through later, legitimate placements.
         self._probe_at: Optional[float] = None
         self._probe_baseline: Optional[float] = None
+        # The decision a balance probe must reconcile if it fires: what the
+        # book was asked to hold when the slip never showed a receipt.
+        self._probe_candidate: Optional[dict] = None
         # Liveness pulse state (see PULSE_INTERVAL_S). The heartbeat file has
         # two writers now — the main thread at cycle end, the pulse thread
         # between them — so every write is serialised by _hb_lock.
@@ -888,15 +891,20 @@ class LiveRunner:
         for k in [k for k, exp in self._avoid.items() if exp <= now]:
             self._avoid.pop(k, None)
 
-    def _arm_unconfirmed_probe(self) -> None:
+    def _arm_unconfirmed_probe(self, candidate: Optional[dict] = None) -> None:
         """Schedule the post-unconfirmed balance probe.
 
         The baseline is the balance OBSERVED before this write is possible —
         or, on a fresh process that has never read it, the first reading
         after arming (the probe then compares the FOLLOWING reading to it).
+        `candidate` carries what the book was asked to hold, so a later
+        balance drop can be RECONCILED to the ledger instead of only
+        alerted about (2026-11-01: two real bets sat outside the book's own
+        ledger as 'unconfirmed' phantom alerts).
         """
         self._unconfirmed_at = time.monotonic()
         self._probe_at = time.monotonic() + BALANCE_PROBE_DELAY_S
+        self._probe_candidate = candidate or None
         if self._probe_baseline is None:
             self._probe_baseline = self._balance_observed
 
@@ -924,6 +932,7 @@ class LiveRunner:
             if now - self._unconfirmed_at > BALANCE_PROBE_MAX_WAIT_S:
                 self._probe_at = None
                 self._probe_baseline = None
+                self._probe_candidate = None
                 if self.notifier is not None:
                     self.notifier.warn(
                         "Phantom probe never got a balance reading",
@@ -937,17 +946,49 @@ class LiveRunner:
         baseline = self._probe_baseline
         self._probe_at = None
         self._probe_baseline = None
-        if baseline is not None and bal < baseline - 0.5:
+        if baseline is None or bal >= baseline - 0.5:
+            self._probe_candidate = None
+            return
+        # RECONCILE FIRST, alert second. A drop within the planned stake's
+        # tolerance is the book's own proof the bet went in: record it as a
+        # pending position (receipt: balance_delta) instead of leaving real
+        # money outside the ledger (2026-11-01 13:30/13:33, two live bets).
+        cand = self._probe_candidate
+        self._probe_candidate = None
+        planned = float((cand or {}).get("stake_ngn") or 0.0)
+        drop = baseline - bal
+        if cand and planned > 0 and abs(drop - planned) <= 2.0:
+            self.ledger.record_pending(
+                {
+                    **cand,
+                    "receipt": "balance_delta",
+                    # The final ticket odds live on the book (Bet History);
+                    # the ledger carries the priced odds and says so.
+                    "odds_source": "priced",
+                }
+            )
             self._balance_alert_fired = True
             if self.notifier is not None:
-                self.notifier.critical(
-                    "Balance dropped after an unconfirmed placement",
-                    f"account went {baseline:.2f} -> {bal:.2f} NGN ~30s after "
-                    "a placement that never showed a receipt — a live bet may "
-                    "be missing from the ledger; check Bet History and "
-                    "reconcile",
+                self.notifier.warn(
+                    "Unconfirmed placement reconciled via balance drop",
+                    f"{cand.get('market_label')} / {cand.get('selection')}: "
+                    f"account {baseline:.2f} -> {bal:.2f} (-{drop:.2f} == planned "
+                    "stake). Recorded as a live position with receipt "
+                    "'balance_delta'. The book's receipt never rendered; "
+                    "verify final odds in Bet History.",
                     cycle=self.cycle,
                 )
+            return
+        self._balance_alert_fired = True
+        if self.notifier is not None:
+            self.notifier.critical(
+                "Balance dropped after an unconfirmed placement",
+                f"account went {baseline:.2f} -> {bal:.2f} (-{drop:.2f}, planned "
+                f"{planned:.2f}) ~30s after a placement that never showed a "
+                "receipt and no matching candidate — a live bet may be "
+                "missing from the ledger; check Bet History and reconcile",
+                cycle=self.cycle,
+            )
 
     def _place_bets_locked(self, decisions: list, state, cycle: int) -> int:
         placed = 0
@@ -1067,6 +1108,23 @@ class LiveRunner:
                     or str(label).lower() in slip_text_l
                 )
                 sel_ok = str(d.opportunity.selection).lower() in slip_text_l
+                # A leftover RECEIPT from the previous bet is not a pending
+                # slip: the book keeps its 'Submission Successful' modal up
+                # until acknowledged, and reading that text here turns a
+                # fresh attempt into a fake identity-mismatch refusal
+                # (2026-11-01 13:29) — no place, no receipt, a burned cycle.
+                # Dismiss the modal and let the next cycle place against a
+                # clean slip; never place money off a slip whose text cannot
+                # name its own contents.
+                if "submission successful" in slip_text_l and not sel_ok:
+                    try:
+                        self.betslip.dismiss_receipt()
+                    except Exception:
+                        pass
+                    self.last_error = (
+                        "stale placement receipt on the slip — dismissed, retry next cycle"
+                    )
+                    continue
                 # A slip rendered by the simulator says so ('Simulate',
                 # 'virtually simulated'); its bets never hit the real book.
                 looks_sim = "simulat" in slip_text_l
@@ -1187,7 +1245,22 @@ class LiveRunner:
                         result.get("error") if isinstance(result, dict) else "no result"
                     )
                     self.last_error = f"placement not confirmed by the book: {error}"
-                    self._arm_unconfirmed_probe()
+                    self._arm_unconfirmed_probe(
+                        {
+                            "match_id": state.match_id,
+                            "market_key": d.opportunity.market_key,
+                            "market_label": label,
+                            "selection": d.opportunity.selection,
+                            "odds": float(getattr(d.opportunity, "odds", 0.0) or 0.0),
+                            "stake_ngn": float(d.stake_ngn or 0.0),
+                            "model_p": getattr(d.opportunity, "model_p", None),
+                            "p_lower": getattr(d.opportunity, "p_lower", None),
+                            "ev": getattr(d.opportunity, "ev", None),
+                            "confidence": getattr(
+                                d.opportunity, "model_confidence", None
+                            ),
+                        }
+                    )
                     if self.notifier is not None:
                         self.notifier.warn(
                             "Placement unconfirmed — NOT recorded",
@@ -1206,6 +1279,7 @@ class LiveRunner:
                 # trip a phantom-position alert (2026-10-31).
                 self._probe_at = None
                 self._probe_baseline = None
+                self._probe_candidate = None
                 self._balance_alert_fired = False
                 self.ledger.record_pending(
                     {
