@@ -40,6 +40,7 @@ from atlas.ops.cashout import Position, value_cashout
 from atlas.ops.ledger import BetLedger
 from atlas.ops.notify import Notifier
 from atlas.ops.posture import Posture, posture_for_mode
+from atlas.ops.telemetry import Telemetry, init_telemetry
 from atlas.portfolio.sequential import SequentialConfig, SequentialPortfolio
 
 # The maximum relative difference between the odds that were priced and
@@ -165,9 +166,11 @@ class LiveRunner:
         decision_log_path: Optional[str] = None,
         operator_min_stake: Optional[float] = None,
         operator_max_stake: Optional[float] = None,
+        telemetry: Optional[Telemetry] = None,
     ) -> None:
         self.capture = capture
         self.ledger = ledger
+        self.telemetry = telemetry if telemetry is not None else init_telemetry()
         self.notifier = notifier
         self.betslip = betslip
         self.cashout_driver = cashout_driver
@@ -176,7 +179,7 @@ class LiveRunner:
         self.posture = posture or posture_for_mode("balanced")
         # Operator stake bounds (from the CLI: --min-stake/--max-stake).
         # These are money-safety bounds the operator TYPED — they outrank
-        # the dashboard's saved posture, which is an appetite at best. The
+        # a saved posture, which is an appetite at best. The
         # saved state file once held max_stake_per_bet=100 against an
         # explicit NGN 10 command line and silently re-applied it every
         # cycle (2026-10-28: NGN 35/100 stakes reached recommendations); so
@@ -195,6 +198,9 @@ class LiveRunner:
         self.reports: list[CycleReport] = []
         self.last_error: Optional[str] = None
         self._last_notify_at: Optional[float] = None
+        # Set when a cycle raised; the telemetry feed reads and clears it so
+        # the cycle counter records the crash, not just a not_ready pulse.
+        self._cycle_crashed = False
         self._finished_match_ids: set[str] = set()
         # Per-market failure cooldown: a market the book refuses (slip not
         # placeable — the signature of a SUSPENDED in-play market at
@@ -230,6 +236,9 @@ class LiveRunner:
         self._cycle_open = False
         self._pulse_stop = threading.Event()
         self._pulse_thread: Optional[threading.Thread] = None
+        # Campaign verdict: fires the freeze email exactly once, on the
+        # transition into 'observe' — not on every placement attempt.
+        self._campaign_stop_fired: bool = False
         # --- page ownership ------------------------------------------------
         # ONE re-entrant lock for every PAGE MUTATION: the cycle's board
         # switches/recovery and the placement worker's betslip flow must
@@ -299,9 +308,9 @@ class LiveRunner:
             )
 
     def load_state(self) -> Optional[Posture]:
-        """Restore a posture saved by the dashboard.
+        """Restore a posture saved by the operator.
 
-        The dashboard's posture is an APPETITE; the operator's CLI stake
+        The saved posture is an APPETITE; the operator's CLI stake
         bounds are money safety and re-apply to every loaded posture —
         the saved file once carried max_stake_per_bet=100 against an
         explicit NGN 10 command line and re-applied it every cycle.
@@ -699,6 +708,15 @@ class LiveRunner:
                     decisions, req["state"], req["cycle"]
                 )
                 self._place_stats["done"] += placed
+                # ASYNC placement: the cycle report carries placed=0 by
+                # design, so the placed counter is fed HERE, where the book
+                # actually accepted the bet.
+                try:
+                    self.telemetry.placed_total.add(
+                        placed, attributes={"outcome": "ok"}
+                    )
+                except Exception:
+                    pass
                 if placed < len(decisions):
                     self._place_stats["failed"] += len(decisions) - placed
                 self._place_last = {
@@ -839,6 +857,31 @@ class LiveRunner:
                 self.notifier.warn(
                     "Daily stop active — placement refused",
                     f"daily P&L {self.ledger.daily_pnl():.2f}",
+                    cycle=cycle,
+                )
+            return 0
+        # Campaign verdict (pre-registered, atlas/ops/campaign.py): the
+        # settled-cohort ROI CI decides on its own whether real money keeps
+        # flowing. The recompute lives here beside the daily stop, so the
+        # verdict is enforced at the LAST wall before money even if the
+        # hourly scorer stalls.
+        try:
+            from atlas.ops.campaign import refresh_state_file
+
+            verd = refresh_state_file(self.ledger)
+        except Exception:
+            verd = None
+        if verd is not None and verd.get("action") == "observe":
+            if self.notifier is not None and not self._campaign_stop_fired:
+                self._campaign_stop_fired = True
+                self.notifier.warn(
+                    "Campaign verdict: OBSERVE — real-money placement frozen",
+                    (
+                        f"{verd.get('why', '')} | cohort n={verd.get('n')} "
+                        f"roi {verd.get('roi_pct')}% "
+                        f"CLV {verd.get('clv_pct')}% | candidates keep "
+                        "being scored, no stakes are submitted"
+                    ),
                     cycle=cycle,
                 )
             return 0
@@ -1341,6 +1384,16 @@ class LiveRunner:
                 bet.get("bet_id", ""), r.status, r.settled_odds
             )
             settled += 1
+        if settled:
+            # Reconciliation ran for real this cycle — feed the counter even
+            # though the cycle report only shows settlements when the final
+            # whistle lands inside one cycle.
+            try:
+                self.telemetry.settled_total.add(
+                    settled, attributes={"outcome": "ok"}
+                )
+            except Exception:
+                pass
         return settled
 
     # --- choosing a match -------------------------------------------------
@@ -1732,6 +1785,33 @@ class LiveRunner:
         cycle runs.
         """
         self.load_state()
+        # Gauge sources: the observable gauges read the loop's live state at
+        # collection time. heartbeat_age_s proves when the loop LAST RAN,
+        # not that a cycle was correct — the pulse thread owns the write.
+        t = self.telemetry
+        t.set_gauge_source(
+            "atlas.heartbeat_age_s",
+            lambda: (
+                max(0.0, time.monotonic() - self._hb_last_write)
+                if self._hb_last_write
+                else -1.0
+            ),
+        )
+        t.set_gauge_source("atlas.daily_pnl_ngn", self.ledger.daily_pnl)
+        t.set_gauge_source(
+            "atlas.stop_active",
+            lambda: 1.0 if self.ledger.is_daily_stop_active() else 0.0,
+        )
+        t.set_gauge_source(
+            "atlas.open_exposure_ngn",
+            lambda: sum(
+                b.get("stake_ngn", 0.0) for b in self.ledger.open_bets()
+            ),
+        )
+        t.set_gauge_source(
+            "atlas.posture_max_stake_ngn",
+            lambda: float(getattr(self.posture, "max_stake_per_bet", 0.0) or 0.0),
+        )
         n = 0
         # The pulse thread owns liveness from here on: even a cycle wedged
         # into minutes of bounded-but-slow reads keeps the heartbeat fresh.
@@ -1743,8 +1823,8 @@ class LiveRunner:
         self._pulse_thread.start()
         try:
             while max_cycles is None or n < max_cycles:
-                # Re-read the persisted posture each cycle: the dashboard
-                # writes state.json when the operator steers, so a running
+                # Re-read the persisted posture each cycle: the operator's
+                # posture CLI writes state.json when steering, so a running
                 # loop picks the change up on the next cycle without a
                 # restart.
                 self.load_state()
@@ -1756,10 +1836,12 @@ class LiveRunner:
                 # number, and the real report overwrites it at cycle end.
                 self._heartbeat_scan_ping()
                 self._cycle_open = True
+                _cycle_start = time.monotonic()
                 try:
                     self._stage_set(f"cycle {self.cycle + 1}: capture")
                     report = self.run_cycle()
                 except Exception as e:  # noqa: BLE001
+                    self._cycle_crashed = True
                     self.last_error = f"cycle {self.cycle} crashed: {e!r}"
                     report = CycleReport(
                         cycle=self.cycle,
@@ -1767,6 +1849,8 @@ class LiveRunner:
                         ready=False,
                         reason=self.last_error,
                     )
+                    report.daily_pnl = self.ledger.daily_pnl()
+                    report.stop_active = self.ledger.is_daily_stop_active()
                     self.reports.append(report)
                     if self.notifier is not None:
                         try:
@@ -1780,6 +1864,7 @@ class LiveRunner:
                 self._write_heartbeat(report)
                 self._cycle_open = False
                 self._stage_set("idle (between cycles)")
+                self._note_cycle_telemetry(report, time.monotonic() - _cycle_start)
                 n += 1
                 if max_cycles is None:
                     time.sleep(self.cycle_s)
@@ -1790,6 +1875,44 @@ class LiveRunner:
             self._pulse_stop.set()
             self.drain(timeout=30.0)
         return self.reports
+
+    def _note_cycle_telemetry(self, report: CycleReport, duration_s: float) -> None:
+        """Feed one completed cycle to the telemetry facade.
+
+        The outcome is the ONLY counter dimension (five fixed values), so an
+        exploded match id can never blow up the metric vocabulary. Failure
+        here is swallowed — telemetry must never be the reason a trading
+        cycle dies.
+        """
+        try:
+            if self._cycle_crashed:
+                self._cycle_crashed = False
+                outcome = "crashed"
+            elif report.settled and "match finished" in (report.reason or ""):
+                outcome = "finished"
+            elif report.stop_active:
+                outcome = "stop_active"
+            elif report.ready:
+                outcome = "ok"
+            else:
+                outcome = "not_ready"
+            self.telemetry.note_cycle(
+                outcome=outcome,
+                ready=report.ready,
+                opportunities=report.opportunities,
+                planned=report.planned,
+                placed=report.placed,
+                settled=report.settled,
+                arbs=report.arbs,
+                cashouts=report.cashout_taken,
+                duration_s=duration_s,
+                daily_pnl_ngn=report.daily_pnl,
+                stop_active=report.stop_active,
+                atlas_cycle=report.cycle,
+                reason=(report.reason or "")[:200],
+            )
+        except Exception:  # noqa: BLE001
+            self._cycle_crashed = False
 
     def _heartbeat_scan_ping(self) -> None:
         """A cycle-start heartbeat: the loop is known-alive and scanning.

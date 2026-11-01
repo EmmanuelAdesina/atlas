@@ -50,7 +50,6 @@ REPO_PAIRS=()
 add_file "deploy/vps/atlas-loop.service"                        "/etc/systemd/system/atlas-loop.service" root 644
 add_file "deploy/vps/units/atlas-xvfb.service"                  "/etc/systemd/system/atlas-xvfb.service" root 644
 add_file "deploy/vps/units/atlas-browser.service"               "/etc/systemd/system/atlas-browser.service" root 644
-add_file "deploy/vps/units/atlas-dashboard.service"             "/etc/systemd/system/atlas-dashboard.service" root 644
 add_file "deploy/vps/units/atlas-watchdog.service"              "/etc/systemd/system/atlas-watchdog.service" root 644
 add_file "deploy/vps/units/atlas-watchdog.timer"                "/etc/systemd/system/atlas-watchdog.timer" root 644
 add_file "deploy/vps/units/atlas-backup.service"                "/etc/systemd/system/atlas-backup.service" root 644
@@ -59,8 +58,10 @@ add_file "deploy/vps/units/atlas-docker-prune.service"          "/etc/systemd/sy
 add_file "deploy/vps/units/atlas-docker-prune.timer"            "/etc/systemd/system/atlas-docker-prune.timer" root 644
 add_file "deploy/vps/units/atlas-browser-recycle.service"       "/etc/systemd/system/atlas-browser-recycle.service" root 644
 add_file "deploy/vps/units/atlas-browser-recycle.timer"         "/etc/systemd/system/atlas-browser-recycle.timer" root 644
-add_file "deploy/vps/units/atlas-cd.service"                    "/etc/systemd/system/atlas-cd.service" root 644
+add_file "deploy/vps/units/atlas-cd.service"                     "/etc/systemd/system/atlas-cd.service" root 644
 add_file "deploy/vps/units/atlas-cd.timer"                      "/etc/systemd/system/atlas-cd.timer" root 644
+add_file "deploy/vps/units/atlas-settle.service"                "/etc/systemd/system/atlas-settle.service" root 644
+add_file "deploy/vps/units/atlas-settle.timer"                  "/etc/systemd/system/atlas-settle.timer" root 644
 add_file "deploy/vps/atlas-watchdog.sh"                         "/usr/local/sbin/atlas-watchdog.sh" root 755
 add_file "deploy/vps/files/scripts/atlas-backup.sh"             "/usr/local/sbin/atlas-backup.sh" root 755
 add_file "deploy/vps/files/scripts/atlas-docker-prune.sh"       "/usr/local/sbin/atlas-docker-prune.sh" root 755
@@ -73,7 +74,7 @@ add_file "deploy/vps/atlas-apply.sh"                             "/usr/local/sbi
 add_file "deploy/vps/atlas-cd.sh"                                "/usr/local/sbin/atlas-cd.sh" root 755
 add_file "deploy/vps/atlas-deploy-smoke.sh"                      "/usr/local/sbin/atlas-deploy-smoke.sh" root 755
 
-TIMERS="atlas-backup.timer atlas-docker-prune.timer atlas-browser-recycle.timer atlas-cd.timer"
+TIMERS="atlas-backup.timer atlas-docker-prune.timer atlas-browser-recycle.timer atlas-cd.timer atlas-settle.timer"
 
 need_sysctl_reload=false
 need_daemon_reload=false
@@ -157,7 +158,7 @@ restart_unit() {
       systemctl restart atlas-browser
       echo "apply: restarted atlas-browser"
       ;;
-    atlas-dashboard.service|atlas-cd.service)
+    atlas-cd.service)
       systemctl restart "$u" 2>/dev/null || true
       echo "apply: restarted $u"
       ;;

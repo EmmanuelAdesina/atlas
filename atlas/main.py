@@ -460,6 +460,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     from atlas.ops.ledger import BetLedger, LedgerConfig
     from atlas.ops.notify import Notifier
     from atlas.ops.posture import DEFAULT_POSTURE, posture_for_mode, propose_posture
+    from atlas.ops.telemetry import init_telemetry
+
+    # Telemetry is the ONLY external surface left now that the dashboard is
+    # gone: outbound OTLP push, zero listening sockets. Unconfigured, it is
+    # a no-op and the loop runs exactly as before.
+    telemetry = init_telemetry(session=args.session)
+    if telemetry.endpoint:
+        console.print(
+            f"[cyan]OTLP telemetry -> {telemetry.endpoint} "
+            f"(service: {telemetry._service_name()})[/cyan]"
+        )
 
     adapter = WebBridgeAdapter(
         session=args.session,
@@ -525,10 +536,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         decision_log_path=args.decision_log,
         operator_min_stake=args.min_stake,
         operator_max_stake=args.max_stake,
+        telemetry=telemetry,
     )
     runner.load_state()
-    # Persist the effective startup posture so the dashboard's /status and
-    # any supervising process see exactly what this loop is running with.
+    # Persist the effective startup posture so the supervising processes
+    # (watchdog, telemetry scrape) see exactly what this loop is running with.
     runner.save_state()
     console.print(
         f"[bold]Atlas live loop[/bold] | session {args.session} | "
@@ -536,24 +548,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         f"[{'ENABLED' if args.submit else 'OFF (observe only)'}]"
     )
     console.print(f"Posture: {runner.posture.describe()}")
-    if args.dashboard:
-        from atlas.live.control import serve
-
-        console.print(
-            f"[cyan]Control dashboard on http://{args.host}:{args.port}[/cyan]"
-        )
-        # The dashboard process is an OBSERVER: the trading loop owns the
-        # browser tab, and a cycle in this process would navigate it behind
-        # the loop's back (process-local page locks cannot see it). Manual
-        # cycles are refused; POST /posture steering stays available.
-        serve(
-            runner,
-            host=args.host,
-            port=args.port,
-            notifier=notifier,
-            manual_cycles=False,
-        )
-        return 0
     if not args.submit:
         console.print(
             "[yellow]Submission is OFF. The loop will plan but not place. "
@@ -566,8 +560,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     finally:
         # Let an in-flight placement land and record before the process
         # exits; a submitted ticket the ledger never sees is a phantom
-        # position with real money on it.
+        # position with real money on it. And flush the last telemetry
+        # batch: an unflushed export is a lost foot of the record.
         runner.shutdown(timeout=30.0)
+        telemetry.shutdown()
     for report in runner.reports[-10:]:
         console.print(report.describe())
     return 0
@@ -1041,20 +1037,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--decision-log",
         default="data/decisions/loop_decisions.jsonl",
         help="Where every cycle's decisions are logged",
-    )
-    run.add_argument(
-        "--dashboard", action="store_true", help="Serve the control dashboard instead of looping"
-    )
-    run.add_argument(
-        "--host",
-        default=None,
-        help="Dashboard bind address (default: ATLAS_HOST, else 127.0.0.1)",
-    )
-    run.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Dashboard port (default: ATLAS_PORT, else 8077)",
     )
     run.set_defaults(func=cmd_run)
     return p

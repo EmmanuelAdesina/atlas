@@ -6,7 +6,6 @@ set -u
 DEADLINE=$(( $(date +%s) + ${ATLAS_CD_SMOKE_WINDOW:-300} ))
 SERVICES="atlas-xvfb atlas-browser atlas-loop"
 HB=/opt/atlas/data/ops/heartbeat.json
-DASH_URL=${ATLAS_DASH_URL:-http://100.93.175.33:8077/status}
 
 fresh() {
   [ -f "$HB" ] || return 1
@@ -37,13 +36,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     sleep 12
     continue
   fi
-  # observer API must respond
-  if ! curl -sf -m 6 "$DASH_URL" >/dev/null 2>&1; then
-    echo "smoke: dashboard not responding"
-    sleep 12
-    continue
-  fi
-  echo "smoke: healthy (units active, extension attached, heartbeat fresh, dashboard answering)"
+  echo "smoke: healthy (units active, extension attached, heartbeat fresh)"
   exit 0
 done
 

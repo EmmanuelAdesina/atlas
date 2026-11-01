@@ -1,7 +1,7 @@
 """The SMTP email alert sink.
 
 Unattended operation needs an alert channel that reaches a phone when
-nobody is watching the dashboard: the heartbeat proves the loop ran, only
+no operator is watching the console: the heartbeat proves the loop ran, only
 alerting proves someone heard. Ground rules:
 
   - INFO must never email (per-cycle refusals would flood an inbox);

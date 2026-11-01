@@ -374,7 +374,7 @@ def test_async_placement_reserves_inflight_and_dedupes(ledger):
 
 
 def test_saved_posture_stake_cap_does_not_override_the_operator(ledger, tmp_path):
-    """2026-10-28: the dashboard-saved posture held max_stake_per_bet=100
+    """2026-10-28: a saved posture held max_stake_per_bet=100
     against an explicit NGN 10 CLI and re-applied it every cycle (NGN 35/100
     stakes reached recommendations). The operator bounds re-apply after
     EVERY load."""
@@ -882,7 +882,7 @@ def test_cashout_offers_are_valued_every_cycle(ledger):
 
 
 # --- balance visibility + display, 2026-10-28 ------------------------------
-# The dashboard showed 'account balance ngn' empty and
+# The browser UI showed 'account balance ngn' empty and
 # 'PostureMode.BALANCED' — the balance was only read from a match panel
 # (none open in board mode) and the enum repr leaked into the panel.
 

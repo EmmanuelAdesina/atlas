@@ -5,7 +5,7 @@ daily stop, drift, an open position needing attention. Notifications go to
 four sinks, all optional and all failing soft — a notification channel going
 down must never take the betting loop down with it:
 
-  - the console (rich), for a live dashboard;
+  - the console (rich), for the operator;
   - a JSONL audit file, so every notification is replayable;
   - an HTTP webhook, for a phone push / Telegram / Slack style endpoint;
   - SMTP email (ATLAS_SMTP_* env), for unattended-operation alerting —

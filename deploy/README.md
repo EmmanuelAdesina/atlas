@@ -26,7 +26,7 @@ cd /opt/atlas
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 cp .env.example .env
-$EDITOR .env          # ATLAS_WEBHOOK_URL, ATLAS_HOST=0.0.0.0, ...
+$EDITOR .env          # ATLAS_WEBHOOK_URL, ATLAS_WEBBRIDGE_SESSION, ...
 ```
 
 ## 3. The browser and the daemon
@@ -61,11 +61,38 @@ sudo cp deploy/*.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now kimi-webbridge.service
 sudo systemctl enable --now atlas-loop.service
-sudo systemctl enable --now atlas-dashboard.service
 ```
 
 The loop service runs **observe-only**: it plans and prices but does not
 place. That is deliberate.
+
+## 4a. Telemetry
+
+Atlas has no web dashboard and no listening port. The only observability
+surface is **outbound OTLP push** (metrics + traces, protobuf over HTTP) to
+any collector you point it at:
+
+```bash
+# /opt/atlas/.env
+ATLAS_OTLP_ENDPOINT=http://collector.internal:4318
+# optional auth headers, "k=v;k=v"
+ATLAS_OTLP_HEADERS=authorization=Bearer%20***
+```
+
+The exporter appends `/v1/metrics` and `/v1/traces` when you pass a bare
+base. Unset, the loop runs exactly the same — telemetry failure disables
+monitoring quality, never the loop. Dependencies live in the `otel` extra:
+
+```bash
+.venv/bin/pip install -e ".[otel]"
+```
+
+What reaches the collector: cycle counts by outcome
+(`ok|not_ready|crashed|finished|stop_active`) and cycle duration;
+opportunities, planned/placed/settled bets, arb signals, cashouts taken;
+and gauges for heartbeat age, daily P&L, open exposure, the posture's max
+stake and the daily-stop flag. `atlas.heartbeat_age_s` proves when the loop
+***last ran*** — it says nothing about whether a cycle was correct.
 
 ## 5. Prove it out, in this order
 
@@ -119,7 +146,5 @@ tail -f /var/log/atlas/loop.log
   the daemon: `sudo systemctl restart kimi-webbridge.service`.
 - **The session expires.** The loop reports it through the webhook and stops
   placing. Log into SportyBet again in the browser.
-- **The dashboard** is on `ATLAS_HOST:ATLAS_PORT`. It can set the posture
-  and read the state. It cannot place a bet.
 - **The ledger** (`data/ops/ledger.jsonl`) and the decision log
   (`data/decisions/loop_decisions.jsonl`) are the audit trail. Back them up.

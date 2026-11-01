@@ -128,8 +128,9 @@ class BetLedger:
         """Re-read the ledger file from disk.
 
         For processes that only OBSERVE a ledger another process writes
-        (the control dashboard). Read-only: it never appends or mutates
-        bets, and the file is append-only JSONL, so re-reading is safe.
+        (for the operator / log consumer). Read-only: it never appends or
+        mutates bets, and the file is append-only JSONL, so re-reading is
+        safe.
         """
         with self._lock:
             self._bets = {}
@@ -153,10 +154,22 @@ class BetLedger:
         with self._lock:
             if self.is_daily_stop_active():
                 return False
+            # Campaign verdict freeze: when the pre-registered verdict says
+            # 'observe' (95% CI on settled per-bet ROI excludes a positive
+            # return), real money stops — same wall as the daily stop.
+            if self.is_campaign_frozen():
+                bet.status = "campaign_frozen"
+                self._append(bet, "bet_refused_campaign")
+                return False
             if not self._stake_in_range(bet.stake_ngn):
                 return False
             bet.status = "placed"
-            bet.placed_at = datetime.now(timezone.utc).isoformat()
+            # placed_at is the claim time of record. Keep an explicitly
+            # staged one (external recon / replayed events carry their own
+            # true time) — overwriting it would forge the book's clock and
+            # silently flip the campaign cohort's pre-campaign exclusion.
+            if not bet.placed_at:
+                bet.placed_at = datetime.now(timezone.utc).isoformat()
             self._bets[bet.bet_id] = bet
             self._append(bet, "bet_placed")
             return True
@@ -203,8 +216,20 @@ class BetLedger:
     def is_daily_stop_active(self) -> bool:
         return self.daily_pnl() <= self.config.daily_loss_limit
 
+    def is_campaign_frozen(self) -> bool:
+        """True while the campaign verdict (data/ops/campaign_state.json)
+        has frozen real-money placement. Estranged import: the campaign
+        module must not drag ledger consumers into its path tree."""
+        from atlas.ops.campaign import frozen
+
+        return frozen()
+
     def can_place_bet(self, stake_ngn: float) -> bool:
-        return not self.is_daily_stop_active() and self._stake_in_range(stake_ngn)
+        return (
+            not self.is_daily_stop_active()
+            and not self.is_campaign_frozen()
+            and self._stake_in_range(stake_ngn)
+        )
 
     def summary(self) -> dict:
         with self._lock:

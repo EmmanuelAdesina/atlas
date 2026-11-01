@@ -21,6 +21,13 @@ test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]
+# Telemetry: OTel SDK + OTLP/HTTP exporter (pure-python wire stack; the loop
+# runs as a no-op without these — see atlas/ops/telemetry.py).
+otel = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.20.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
