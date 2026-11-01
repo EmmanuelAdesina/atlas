@@ -1,0 +1,6 @@
+[Unit]
+Description=ATLAS wedge watchdog (chrome/daemon liveness)
+After=network-online.target atlas-browser.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/atlas-watchdog.sh

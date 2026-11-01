@@ -1,0 +1,90 @@
+name: atlas-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      notify_test:
+        description: "Send a test email from the notify job instead of a real run"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install deps
+        run: pip install -q -r requirements.txt
+      - name: Run test suite
+        run: pytest tests -q
+
+  shell-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check all deploy scripts
+        run: |
+          fail=0
+          for f in $(git ls-files 'deploy/vps/*.sh' 'deploy/vps/files/scripts/*.sh'); do
+            bash -n "$f" || fail=1
+          done
+          if command -v shellcheck >/dev/null; then
+            shellcheck -S warning $(git ls-files 'deploy/vps/*.sh' 'deploy/vps/files/scripts/*.sh') || true
+          fi
+          exit $fail
+
+  notify:
+    # EMAIL THE OPERATOR ON ANY CI BREAK. No silent failures in this pipeline.
+    needs: [tests, shell-check]
+    if: failure() || github.event.inputs.notify_test == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Email the operator
+        env:
+          SMTP_HOST: ${{ secrets.ATLAS_SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.ATLAS_SMTP_PORT }}
+          SMTP_USER: ${{ secrets.ATLAS_SMTP_USER }}
+          SMTP_PASS: ${{ secrets.ATLAS_SMTP_PASS }}
+          SMTP_TO: ${{ secrets.ATLAS_SMTP_TO }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NOTIFY_TEST: ${{ github.event.inputs.notify_test }}
+        run: |
+          python3 - <<'PY'
+          import os, smtplib
+          from email.mime.text import MIMEText
+          host, user, passto = os.environ["SMTP_HOST"], os.environ["SMTP_USER"], os.environ["SMTP_PASS"]
+          port = int(os.environ.get("SMTP_PORT") or 587)
+          to = [a.strip() for a in os.environ["SMTP_TO"].split(",") if a.strip()]
+          is_test = os.environ.get("NOTIFY_TEST") == "true"
+          if is_test:
+              subject = "ATLAS CI: TEST notification - pipeline email path verified"
+              body = "This is the test email from the atlas-ci notify job. If you are reading it, CI failure alerting works."
+          else:
+              subject = "ATLAS CI FAILED: tests/shell-check red on ${{ github.sha }}"[:150]
+              body = (
+                  "The atlas CI pipeline failed and main is NOT verified.\n"
+                  f"Repo: {os.environ['RUN_URL'].split('/actions/')[0]}\nCommit: ${{ github.sha }}\n"
+                  f"Run log: {os.environ['RUN_URL']}\n\n"
+                  "CD on the VPS will not deploy broken code - no action needed to stop a bad deploy, "
+                  "but the fix belongs in this commit."
+              )
+          msg = MIMEText(body, "plain", "utf-8")
+          msg["Subject"], msg["From"], msg["To"] = subject, user, ", ".join(to)
+          with smtplib.SMTP(host, port, timeout=30) as s:
+              s.starttls(); s.login(user, passto); s.sendmail(user, to, msg.as_string())
+          print("notification sent")
+          PY

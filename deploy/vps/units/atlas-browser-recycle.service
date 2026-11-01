@@ -1,0 +1,5 @@
+[Unit]
+Description=ATLAS scheduled Chrome recycle (anti swap-thrash)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/atlas-browser-recycle.sh

@@ -1,0 +1,16 @@
+[Unit]
+Description=ATLAS virtual display (Xvfb) for the browser plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=reliastra
+Group=reliastra
+ExecStart=/usr/bin/Xvfb :0 -screen 0 1920x1080x24 -nolisten tcp -ac
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

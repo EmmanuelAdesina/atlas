@@ -1,0 +1,7 @@
+[Unit]
+Description=ATLAS daily docker churn guard
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,32 @@
+[Unit]
+Description=ATLAS Chrome (SportyBet plane) - the designated OOM victim
+After=network-online.target atlas-xvfb.service kimi-webbridge.service
+Wants=network-online.target atlas-xvfb.service kimi-webbridge.service
+
+[Service]
+Type=simple
+User=reliastra
+Group=reliastra
+Environment=HOME=/home/reliastra
+Environment=DISPLAY=:0
+# RAM discipline: this cgroup eats the squeeze FIRST so prod never OOMs.
+# Kill here is cheap: watchdog restarts Chrome, profile persists.
+ExecStart=/usr/bin/google-chrome --user-data-dir=/opt/atlas/chrome-profile --no-first-run --no-default-browser-check --start-maximized --force-renderer-accessibility --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --js-flags=--max-old-space-size=384 about:blank
+  --user-data-dir=/opt/atlas/chrome-profile \
+  --no-first-run --no-default-browser-check \
+  --disable-gpu --disable-dev-shm-usage \
+  --disk-cache-size=33554432 \
+  --window-position=0,0 --window-size=1920,1080 \
+  about:blank
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+OOMScoreAdjust=800
+MemoryHigh=650M
+MemoryMax=900M
+CPUWeight=120
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,5 @@
+[Unit]
+Description=ATLAS docker image churn guard (keep last 2 reliastra images)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/atlas-docker-prune.sh

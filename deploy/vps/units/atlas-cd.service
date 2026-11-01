@@ -1,0 +1,17 @@
+[Unit]
+Description=ATLAS continuous deployment (pull origin/main, apply, smoke, email)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/atlas
+ExecStart=/usr/local/sbin/atlas-cd.sh
+Nice=10
+# CD must never hold the machine hostage; oneshot + timer re-fires anyway.
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

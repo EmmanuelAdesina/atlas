@@ -1,0 +1,7 @@
+[Unit]
+Description=ATLAS hourly data backups
+[Timer]
+OnCalendar=hourly
+Persistent=true
+[Install]
+WantedBy=timers.target
