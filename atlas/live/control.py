@@ -355,14 +355,17 @@ def build_app(
     def status() -> dict:
         # The dashboard is a separate process from the live loop, so mirror
         # the on-disk truth: the loop's ledger and its persisted posture.
+        # The heartbeat file is the source of truth for the loop's live
+        # state; the dashboard's own runner is just a reader.
         runner.ledger.refresh()
         runner.load_state()
         ledger = runner.ledger
         last = runner.reports[-1] if runner.reports else None
         heartbeat = _read_heartbeat(runner)
+        hb = heartbeat or {}
         return {
             "at": datetime.now(timezone.utc).isoformat(),
-            "cycle": runner.cycle,
+            "cycle": hb.get("cycle", runner.cycle),
             "posture": runner.posture.to_dict(),
             "daily_pnl_ngn": ledger.daily_pnl(),
             "daily_stop_active": ledger.is_daily_stop_active(),
@@ -371,13 +374,15 @@ def build_app(
                 for b in ledger.open_bets()
             ),
             "bets": len(ledger.all_bets()),
-            "submission_enabled": runner.allow_submission,
+            "submission_enabled": hb.get(
+                "submission_enabled", runner.allow_submission
+            ),
             # Async placement: the cycle no longer waits for the book, so
             # this object is how a client sees queued/reserved/in-flight
             # bets without reading the heartbeat file itself.
             "placement": _placement_snapshot(runner, heartbeat),
             "last_cycle": asdict(last) if last is not None else None,
-            "last_error": runner.last_error,
+            "last_error": hb.get("last_error", runner.last_error),
         }
 
     @app.post("/posture")
