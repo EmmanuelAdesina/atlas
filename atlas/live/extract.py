@@ -1173,3 +1173,57 @@ def extract_live_match_state(
         source=source,
         source_url=source_url,
     )
+
+
+def _wrap_js_json_part(snippet: str, fallback: str) -> str:
+    """Wrap an IIFE-JSON-STRING snippet for the capture bundle.
+
+    Each part is evaluated AND parsed inside its own try — one broken part
+    (a wedged scheduler, a mid-render DOM) renders the fallback value and
+    never takes the whole bundle down.
+    """
+    return (
+        r"(function(){ try { return JSON.parse(" + snippet + r"); } "
+        r"catch (e) { return " + fallback + r"; } })()"
+    )
+
+
+def _wrap_js_raw_part(snippet: str, fallback: str) -> str:
+    """Wrap a snippet whose VALUE is returned as-is (not JSON)."""
+    return (
+        r"(function(){ try { return (" + snippet + r"); } "
+        r"catch (e) { return " + fallback + r"; } })()"
+    )
+
+
+def build_capture_batch_js(
+    session_js: str, teams_js: str, scoreboard_js: str, markets_js: str
+) -> str:
+    """ONE evaluate returning everything the capture loop polls per cycle.
+
+    Five-plus sequential daemon round-trips (session probe, page rows, team
+    names, scoreboard, markets) each pay the heavy page's warm latency
+    (~1-5s), stretching capture cycles past two minutes and feeding the
+    extension's command queue after every timeout (2026-11-01). The bundle
+    returns all five values in a single round-trip:
+
+      session    -> the JS_SESSION result (dict or null)
+      teams      -> 'Home vs Away' plain string ('' when absent)
+      rows       -> number of '.match-row' elements (null off-panel)
+      scoreboard -> the extract_scoreboard_js result (dict or null)
+      markets    -> the extract_markets_js result (list or [])
+
+    The Python side falls back to the single reader it replaced whenever a
+    part is missing or malformed, so this is a pure speed path: every
+    existing behavior survives a broken bundle byte-for-byte.
+    """
+    rows_js = "document.querySelectorAll('.match-row').length"
+    return (
+        "(() => { return JSON.stringify({"
+        f"'session': {_wrap_js_json_part(session_js, 'null')}, "
+        f"'teams': {_wrap_js_raw_part(teams_js, '')}, "
+        f"'rows': {_wrap_js_raw_part(rows_js, 'null')}, "
+        f"'scoreboard': {_wrap_js_json_part(scoreboard_js, 'null')}, "
+        f"'markets': {_wrap_js_json_part(markets_js, '[]')}"
+        "}); })()"
+    )

@@ -99,6 +99,9 @@ class LiveCapture:
         # parked on another page.
         self.last_href: str = ""
         self.last_transport_error: str = ""
+        # The batched capture read (build_capture_batch_js) is composed
+        # once: five per-iteration round-trips became one (2026-11-01).
+        self._bundle_js_cache: str | None = None
         # Serialises PAGE MUTATIONS (navigate / reload / tab / panel clicks)
         # against the placement worker's betslip flow. LiveRunner replaces
         # this with its own re-entrant lock so the whole process agrees on
@@ -803,15 +806,19 @@ class LiveCapture:
         home, away = self._team_names()
         return markets_from_js_entries(entries, self.match_id, home, away)
 
+    # The panel-header team names were inline in _team_names(); they are
+    # also a BUNDLE part (2026-11-01 batching), so the source is shared.
+    JS_TEAMS = (
+        "(() => { let h = null; document.querySelectorAll('*').forEach(e => {"
+        " if (!h && e.children.length === 0 && / vs /.test(e.textContent||'')"
+        " && (e.textContent||'').length < 80) h = e; });"
+        " return h ? (h.textContent||'').trim() : ''; })()"
+    )
+
     def _team_names(self) -> tuple[str, str]:
         """The viewed match's team names, from the panel header."""
         try:
-            raw = self._evaluate(
-                "(() => { let h = null; document.querySelectorAll('*').forEach(e => {"
-                " if (!h && e.children.length === 0 && / vs /.test(e.textContent||'')"
-                " && (e.textContent||'').length < 80) h = e; });"
-                " return h ? (h.textContent||'').trim() : ''; })()"
-            )
+            raw = self._evaluate(self.JS_TEAMS)
         except CaptureError:
             return ("", "")
         if isinstance(raw, str) and " vs " in raw:
@@ -827,17 +834,69 @@ class LiveCapture:
             return []
         return extract_markets(texts, self.match_id)
 
-    def _state_from_dom(self) -> LiveMatchState:
+    def _bundle_js(self) -> str:
+        from atlas.live.extract import (
+            build_capture_batch_js,
+            extract_markets_js,
+            extract_scoreboard_js,
+        )
+
+        if self._bundle_js_cache is None:
+            self._bundle_js_cache = build_capture_batch_js(
+                self.JS_SESSION,
+                self.JS_TEAMS,
+                extract_scoreboard_js(),
+                extract_markets_js(),
+            )
+        return self._bundle_js_cache
+
+    def read_capture_bundle(self) -> dict:
+        """One round-trip: session + teams + rows + scoreboard + markets.
+
+        Returns {} whenever the bundle itself is unavailable — a daemon
+        timeout, a non-JSON answer, a missing top-level part — in which
+        case the capture loop falls back to the single readers this
+        batched read replaces. The bundle is a SPEED path, never a
+        behavior change.
+        """
+        import json
+
+        try:
+            raw = self._evaluate(self._bundle_js())
+        except CaptureError:
+            return {}
+        if isinstance(raw, str):
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                return {}
+        else:
+            data = raw
+        return data if isinstance(data, dict) else {}
+
+    def _state_from_dom(
+        self,
+        board: dict | None = None,
+        teams: str | None = None,
+    ) -> LiveMatchState:
         """Build the observed state from the DOM alone.
 
         The accessibility tree does not carry the scoreboard, so this is the
         normal path: the scoreboard comes from the DOM and the team names
-        from the panel header.
+        from the panel header. `board`/`teams` accept values already read
+        from the capture bundle so this costs no extra round-trips.
         """
         from atlas.live.observe import TeamStats
 
-        board = self.read_scoreboard()
-        home, away = self._team_names()
+        if board is None:
+            board = self.read_scoreboard()
+        if teams:
+            home, away = (teams, "")
+            if " vs " in teams:
+                home, away = teams.split(" vs ", 1)
+                home, away = home.strip(), away.strip()
+        else:
+            home, away = self._team_names()
         return LiveMatchState(
             match_id=self.match_id,
             home=TeamStats(
@@ -867,9 +926,21 @@ class LiveCapture:
         if not self.board_loaded():
             self.load_board()
         while True:
-            # P0: a session that has expired is detected and reported, so
-            # the loop can tell the operator instead of failing silently.
-            session = self.session_expired()
+            # ONE batched evaluate covers every steady-path read (2026-11-01:
+            # the market read, team names, rows, scoreboard and state
+            # re-reads were 5-6 sequential round-trips per iteration; the
+            # bundle is one). ANY missing part falls back to the single
+            # reader below, so a broken bundle can only make the cycle
+            # slower, never wrong.
+            bundle = self.read_capture_bundle()
+            sesh = bundle.get("session") if bundle else None
+            if isinstance(sesh, dict) and sesh.get("href"):
+                self.last_href = sesh["href"]
+            session = (
+                sesh
+                if isinstance(sesh, dict) and "expired" in sesh
+                else self.session_expired()
+            )
             if session.get("expired"):
                 return CaptureResult(
                     False,
@@ -883,7 +954,11 @@ class LiveCapture:
             # heavy list with snapshots until its renderer crashed
             # (2026-10-29).
             if self.at_board_list():
-                rows = self.board_row_count()
+                rows = (
+                    bundle.get("rows")
+                    if bundle and isinstance(bundle.get("rows"), int)
+                    else self.board_row_count()
+                )
                 if rows > 0:
                     return CaptureResult(
                         False,
@@ -892,7 +967,23 @@ class LiveCapture:
                         match_id=self.match_id,
                     )
             # The DOM is the primary path; the snapshot is the fallback.
-            markets = self.read_markets_dom()
+            # The bundle's markets part replaces read_markets_dom()'s own
+            # evaluate pair (markets + team names).
+            markets = []
+            bundle_teams = bundle.get("teams") if bundle else None
+            entries = bundle.get("markets") if bundle else None
+            if isinstance(entries, list) and entries:
+                if isinstance(bundle_teams, str) and " vs " in bundle_teams:
+                    b_home, b_away = bundle_teams.split(" vs ", 1)
+                else:
+                    b_home, b_away = self._team_names()
+                from atlas.live.extract import markets_from_js_entries
+
+                markets = markets_from_js_entries(
+                    entries, self.match_id, b_home.strip(), b_away.strip()
+                )
+            if not markets:
+                markets = self.read_markets_dom()
             texts: list[str] = []
             if not markets:
                 try:
@@ -933,10 +1024,20 @@ class LiveCapture:
             empty_reads = 0
             state = extract_live_match_state(texts, self.match_id) if texts else None
             if state is None:
-                state = self._state_from_dom()
+                state = self._state_from_dom(
+                    board=bundle.get("scoreboard")
+                    if isinstance(
+                        bundle.get("scoreboard") if bundle else None, dict
+                    )
+                    else None,
+                    teams=bundle_teams if isinstance(bundle_teams, str) else None,
+                )
             # The DOM is authoritative for the scoreboard: the accessibility
-            # tree does not expose it.
-            board = self.read_scoreboard()
+            # tree does not expose it. The bundle's scoreboard part is the
+            # same JS read; the individual reader runs when it is missing.
+            board = bundle.get("scoreboard") if bundle else None
+            if not isinstance(board, dict) or not board.get("period"):
+                board = self.read_scoreboard()
             if not board.get("period") and self._panel_is_finished():
                 board = {"period": "ft", "home_goals": board.get("home_goals"),
                          "away_goals": board.get("away_goals")}

@@ -606,3 +606,125 @@ def test_recovery_skips_the_hanging_navigate_on_a_crashed_tab():
         "a crashed tab must not wait out the extension navigate timeout"
     )
     assert adapter.cdp_calls == ["Page.navigate"]
+
+
+# ---- batched capture read (one evaluate) --------------------------------
+
+MATCH_URL = "https://www.sportybet.com/football/live/sr:match:1234"
+
+SCOREBOARD = {
+    "home_goals": 1, "away_goals": 0, "period": "2h",
+    "clock_minute": 50, "clock_label": "50'",
+}
+MARKETS = [
+    {"market": "Match Result",
+     "selections": [{"name": "Home", "odds": 2.1}, {"name": "Draw", "odds": 3.2},
+                    {"name": "Away", "odds": 3.5}]},
+    {"market": "Goals Over/Under 2.5",
+     "selections": [{"name": "Over 2.5", "odds": 1.8}, {"name": "Under 2.5", "odds": 2.0}]},
+]
+
+
+def _bundle_payload(href=MATCH_URL, **overrides):
+    """A capture-bundle answer as the daemon would deliver it."""
+    bundle = {
+        "session": {"expired": False, "probe_failed": False, "href": href},
+        "teams": "Arsenal vs Chelsea",
+        "rows": 0,
+        "scoreboard": dict(SCOREBOARD),
+        "markets": [dict(m) for m in MARKETS],
+    }
+    bundle.update(overrides)
+    return json.dumps(bundle)
+
+
+def _capture(adapter, **kw):
+    capture = LiveCapture(
+        adapter, min_markets=kw.pop("min_markets", 2), max_wait_s=1.0,
+        poll_s=0.1, pause_scale=0.0,
+    )
+    return capture, capture.capture(kw.pop("wait", True))
+
+
+def test_capture_bundle_answers_every_read_in_one_evaluate():
+    """The bundle replaces 5-6 sequential round-trips with ONE.
+
+    The stats read stays separate by design (it opens a panel). The
+    session / teams / rows / scoreboard / markets reads must NOT run as
+    individual evaluates any more: each of their DOM markers appears
+    exactly once — inside the single bundle call.
+    """
+    adapter = FakeAdapter({
+        # "'session': " MUST come before "location.href": the bundle code
+        # embeds the session JS (which contains location.href), and the
+        # FakeAdapter returns on the FIRST matching marker.
+        "'session': ": _bundle_payload(),
+        "location.href": MATCH_URL,
+    })
+    capture, result = _capture(adapter)
+    assert result.ready is True, result.reason
+    ev = adapter.evaluations
+    # one bundle call, and it carries every part
+    bundle_calls = [c for c in ev if "'session': " in c]
+    assert len(bundle_calls) == 1
+    assert ".m-table__wrapper" in bundle_calls[0]
+    assert ".m-result-title" in bundle_calls[0]
+    assert "querySelectorAll('.match-row')" in bundle_calls[0]
+    # no part is re-read individually anywhere else
+    assert sum(".m-table__wrapper" in c for c in ev) == 1
+    assert sum(".m-result-title" in c for c in ev) == 1
+    assert sum("querySelectorAll('.match-row')" in c for c in ev) == 1
+    # the state was built from the bundle, not from re-reads
+    assert result.state.period == "2h"
+    assert result.state.home.name == "Arsenal"
+    assert result.state.away.name == "Chelsea"
+    assert result.state.home.goals == 1 and result.state.away.goals == 0
+    assert result.state.clock_minute == 50
+    # href came from the bundle session part
+    assert capture.last_href == MATCH_URL
+    # markets list came from the bundle entries
+    assert len(result.markets) == 2
+    assert all(isinstance(m.get("selections"), list) for m in result.markets)
+
+
+def test_bundle_failure_falls_back_to_single_readers():
+    """A broken bundle only slows the cycle; NOTHING behaves differently.
+
+    Without a bundle payload the single readers (session probe, markets
+    DOM, scoreboard DOM, team names) run exactly as before and the
+    capture still reaches 'ready' through them.
+    """
+    adapter = FakeAdapter({
+        "location.href": MATCH_URL,
+        "expired": json.dumps({"expired": False, "href": MATCH_URL}),
+        "m-table__wrapper": json.dumps(MARKETS),
+        "m-result-title": json.dumps(SCOREBOARD),
+        "/ vs /.test": "Arsenal vs Chelsea",
+    })
+    capture, result = _capture(adapter)
+    assert result.ready is True, result.reason
+    ev = adapter.evaluations
+    # the fallback readers ran, individually
+    assert any(
+        ".m-table__wrapper" in c and "'session': " not in c
+        for c in ev
+    )
+    # the (useless) bundle call still happened once
+    assert (
+        len([c for c in ev if "'session': " in c]) == 1
+    )
+    assert result.state.period == "2h"
+    assert len(result.markets) == 2
+
+
+def test_bundle_unusable_content_becomes_empty_dict():
+    """A bundle with unusable content becomes {}.
+
+    _wrap_js_json_part renders each broken part as its fallback — the top
+    level still parses but carries nothing usable, so read_capture_bundle
+    must return {} and the capture loop falls back to the single readers.
+    """
+    adapter = FakeAdapter({"'session': ": json.dumps({})})
+    capture = LiveCapture(adapter, min_markets=2, pause_scale=0.0)
+    bundle = capture.read_capture_bundle()
+    assert bundle == {}
