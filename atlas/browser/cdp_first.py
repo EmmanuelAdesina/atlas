@@ -91,12 +91,43 @@ class CDPFirstAdapter(WebBridgeAdapter):
             raise
 
     def evaluate_safe(self, code: str) -> Any:
+        # Reads rotate across answering targets on proven stalls: a
+        # prefix-preferred tab with a wedged renderer must not capture
+        # the whole scan plane while another tab answers. Mutating
+        # evaluate() above never rotates (wrong-tab betslip risk).
         try:
-            return cdp_direct.evaluate(code, **self._direct_kwargs())
+            primary = cdp_direct.find_page(
+                self.cdp_url_prefixes, host_hint=self.cdp_host_hint)
+            if primary is None:
+                raise cdp_direct.CDPPreError("cdp evaluate_safe: no matching target")
+            extras = self._extra_targets(primary)
+        except WebBridgeError as pre:
+            if pre.transient and not isinstance(pre, cdp_direct.CDPPostError):
+                return super().evaluate_safe(code)
+            raise
+        try:
+            return cdp_direct.evaluate_read(
+                code, **self._direct_kwargs(), extras=extras, primary=primary)
         except WebBridgeError as exc:
             if self._failoverable(exc):
                 return super().evaluate_safe(code)
             raise
+
+    def _extra_targets(self, primary: dict) -> list[dict]:
+        try:
+            pages = cdp_direct.list_pages()
+        except WebBridgeError:
+            return []
+        out = []
+        for t in pages:
+            url = t.get("url") or ""
+            if t.get("type") != "page" or t.get("id") == primary.get("id"):
+                continue
+            if any(p in url for p in self.cdp_url_prefixes) or (
+                self.cdp_host_hint and self.cdp_host_hint in url
+            ):
+                out.append(t)
+        return out
 
     def click(self, selector: str) -> Any:
         try:

@@ -343,6 +343,47 @@ def evaluate(
     return evaluate_on(page, code, timeout_s=timeout_s)
 
 
+def evaluate_read(
+    code: str,
+    url_prefixes: tuple[str, ...] = (),
+    create_url: Optional[str] = None,
+    host_hint: str = "",
+    timeout_s: Optional[float] = None,
+    extras: Optional[list[dict]] = None,
+    primary: Optional[dict] = None,
+) -> dict:
+    """Evaluate for READ-ONLY scans with target rotation.
+
+    A wedged renderer could keep a prefix-preferred target returning
+    stalls forever while a second matching target answers (2026-11-02:
+    one stalled match panel, two healthy hub tabs). Rotate on PROVEN
+    stalls (the request was sent and got no answer) — a read side effect
+    is none, so riding another tab is safe. Mutating callers (betslip
+    evaluate) never rotate: evaluating betslip JS on a different tab is
+    how a wrong-match bet gets built.
+
+    `primary`: the caller's reserved page target, saved so this path
+    runs ONE /json/list per read (the death-by-a-second-lag budget of a
+    drowning chrome). None means find-or-create here.
+    `extras`: further answering targets tried in order after the primary.
+    """
+    if primary is None:
+        page, _created = ensure_page(
+            url_prefixes, create_url=create_url, host_hint=host_hint)
+    else:
+        page = primary
+    candidates = [page] + [t for t in (extras or []) if t.get("id") != page.get("id")]
+    last: Optional[WebBridgeError] = None
+    for t in candidates:
+        try:
+            return evaluate_on(t, code, timeout_s=timeout_s)
+        except CDPPostError as e:
+            last = e  # sent-but-unanswered: rotate, never replay for reads
+    if last is not None:
+        raise last
+    raise WebBridgeError("cdp evaluate_read: no target offered")
+
+
 def dispatch_click(
     selector: str,
     url_prefixes: tuple[str, ...],
