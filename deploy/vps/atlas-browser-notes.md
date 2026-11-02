@@ -1,5 +1,39 @@
 # atlas-browser unit notes (VPS)
 
+## 2026-11-02 — refresh of the wedge mechanism; unit retuned; capacity verdict
+
+Live-money session was dark all afternoon: capture failing, `priced_selections: 0`
+for ~10 hours while the operator saw 28-35 live matches on a healthy desktop.
+Probes (raw CDP over 9222, /status, journal, cgroup counters) resolved the chain:
+
+1. **The unit had drifted back to `MemoryHigh=650M`** (the 2026-11-01 note says
+   `MemoryHigh` MUST stay unset; forcing internal reclaim wedges Chrome). Fixed:
+   removed again; `MemoryMax=900M` retained as the prod-protecting OOM magnet.
+2. **`--force-renderer-accessibility` was the crown jewel of the churn**: the a11y
+   tree of the day's board is enormous, and `capture.read_markets_dom()` (JS) is
+   already the PRIMARY path; the a11y snapshot is only a fallback that the code
+   itself documents as failing with daemon 502s on the heavy board. Removed.
+3. Added `--process-per-site` (one renderer per site instead of per frame);
+   genuine tab hoards (6+ sporty instances) shared a single core.
+4. **Still not enough.** With the plane clean, cgroup `cpu.stat` showed ~96%
+   SYSTEM time, chromium anon resident ~2.5 MB (heap fully swapped), main
+   thread in D-state, /json reachable in narrow windows only, and evaluate on
+   any sporty page timing out at 40 s while the same evaluate on about:blank
+   returns instantly. Kernel page-fault/swap churn on a 1-vCPU box is the
+   bottleneck; no Chrome flag fixes that.
+5. **The load side grew**: Sporty's SPA shipped a new Single View UI with much
+   deeper live feeds on 2026-11-02 (35+ live matches vs the old Multi View
+   board), so the page itself is heavier than on the 2026-11-01 cutover day.
+
+Operational backups: `/etc/systemd/system/atlas-browser.service.bak-1102`
+(the pre-tune unit). Raw-CDP probe: `/tmp/cdp_eval.py` (stdlib-only websocket
+client; bypasses the extension when the daemon flap makes tool calls wedge).
+
+Verdict unchanged but now proven at the counter level: the stack needs its own
+RAM (4 GB+ upgrade, or split RELIASTRA and Atlas onto separate boxes). Until
+then the plane can complete captures only in calm windows (overnight pattern).
+
+
 ## 2026-11-01 — capture-stall deep fix (cutover day)
 
 The armed loop was stuck in `cycle 1: capture` for 300s+ at Sunday midday
