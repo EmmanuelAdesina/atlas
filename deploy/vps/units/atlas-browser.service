@@ -11,6 +11,9 @@ Environment=HOME=/home/reliastra
 Environment=DISPLAY=:0
 # RAM discipline: this cgroup eats the squeeze FIRST so prod never OOMs.
 # Kill here is cheap: watchdog restarts Chrome, profile persists.
+# Crash-restore loop breaker (wedge-kill -> exit_type Crashed -> next boot
+# replays the drowned tab stack; 2026-11-02 17:0x): reset BEFORE boot.
+ExecStartPre=/usr/local/sbin/atlas-chrome-session-clean.sh
 ExecStart=/usr/bin/google-chrome \
   --user-data-dir=/opt/atlas/chrome-profile \
   --no-first-run --no-default-browser-check \

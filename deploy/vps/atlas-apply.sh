@@ -68,6 +68,7 @@ add_file "deploy/vps/files/scripts/atlas-docker-prune.sh"       "/usr/local/sbin
 add_file "deploy/vps/files/scripts/atlas-browser-recycle.sh"    "/usr/local/sbin/atlas-browser-recycle.sh" root 755
 add_file "deploy/vps/files/scripts/atlas-browser-cdp-preflight.sh" "/usr/local/sbin/atlas-browser-cdp-preflight.sh" root 755
 add_file "deploy/vps/files/scripts/atlas-cdp-deep-probe.py"        "/usr/local/sbin/atlas-cdp-deep-probe.py" root 755
+add_file "deploy/vps/files/scripts/atlas-chrome-session-clean.sh"  "/usr/local/sbin/atlas-chrome-session-clean.sh" root 755
 add_file "deploy/vps/files/99-atlas-memory.conf"                "/etc/sysctl.d/99-atlas-memory.conf" root 644
 add_file "deploy/vps/files/logrotate-atlas"                     "/etc/logrotate.d/atlas" root 644
 add_file "deploy/vps/files/chrome-policy.json"                  "/etc/opt/chrome/policies/managed/kimi-webbridge.json" root 644
