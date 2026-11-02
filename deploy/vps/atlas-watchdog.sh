@@ -25,7 +25,26 @@ if ! pgrep -f "user-data-dir=/opt/atlas/chrome-profile" >/dev/null; then
   exit 0
 fi
 
-# 2. Daemon reachable? (HTTP probe on the fixed port, no $HOME involved)
+# 2. Chrome DevTools (CDP) healthy? A wedged debug server passes the
+# process check (pgrep sees chrome) and often the daemon check (the
+# extension keeps answering), but it starves BOTH the loop's capture and
+# the hourly reconcile (2026-11-02: three wedges inside 90 min while the
+# box sat at ~80 MB free). Probe 9222 directly; twice in a row ->
+# restart the browser plane, same cure as the extension wedge.
+CDP=$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:9222/json/version)
+if [ "$CDP" != "200" ]; then
+  if [ "$PREV" = "cdpGone" ]; then
+    alert "chrome devtools wedged twice" "restarting atlas-browser.service"
+    systemctl restart atlas-browser
+    rm -f "$STATE"
+  else
+    echo "cdpGone" > "$STATE"
+    logger -t atlas-watchdog "cdp probe failed (http=$CDP); armed - second miss recycles the browser"
+  fi
+  exit 0
+fi
+
+# 3. Daemon reachable? (HTTP probe on the fixed port, no $HOME involved)
 WD=$(curl -s -m 8 http://127.0.0.1:10086/status || echo '{}')
 if ! echo "$WD" | grep -q '"running":true'; then
   alert "webbridge daemon unreachable" "restarting kimi-webbridge.service"

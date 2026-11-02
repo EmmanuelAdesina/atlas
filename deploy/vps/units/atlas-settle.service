@@ -9,6 +9,10 @@ WorkingDirectory=/opt/atlas
 # retry when the daemon wedges (2026-11-02 09:00 fire skipped after 4+ min).
 # CDP is probe-proven (264 tickets) and independent of the daemon.
 Environment=ATLAS_BET_HISTORY_TRANSPORT=cdp
+# Preflight: a wedged DevTools server (third wedge this morning) must be
+# recycled BEFORE the scrape, or the hourly loud-skips and the ledger
+# reasons on stale truth. Never recycles with a placement inflight.
+ExecStartPre=/usr/local/sbin/atlas-browser-cdp-preflight.sh
 ExecStart=/opt/atlas/.venv/bin/python -m atlas.ops.settle_history --scrape
 Nice=5
 TimeoutStartSec=900
