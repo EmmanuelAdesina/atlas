@@ -422,6 +422,104 @@ def test_record_book_settle_is_idempotent_at_the_ledger(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# legacy-era settlements: stale statuses reviewed against the book
+
+
+def add_legacy_settled(tmp_path: Path, bet_id: str, placed_at: str, odds: float, stake: float, status: str) -> None:
+    """A legacy settlement pair: bet_placed then a bet_settled row whose
+    status was recorded pre-reconcile with pnl stuck at 0 and
+    settle_source unset — exactly the pre-reconcile era's shape."""
+    ledger = BetLedger(LedgerConfig(), log_path=str(tmp_path / "ledger.jsonl"))
+    rec = BetRecord(
+        bet_id=bet_id,
+        match_id="live",
+        market_key="home_goals",
+        selection="1",
+        odds=odds,
+        stake_ngn=stake,
+        model_p=0.5,
+        p_lower=None,
+        ev=0.05,
+        confidence="medium",
+        correlation_groups=[],
+        placed_at=placed_at,
+        status="placed",
+    )
+    with ledger._lock:
+        ledger._bets[bet_id] = rec
+    ledger._append(rec, "bet_placed")
+    # the era's settle row: final status, no outcome amounts
+    settled = BetRecord(**{**rec.to_dict(), "status": status})
+    ledger._append(settled, "bet_settled")
+
+
+def test_legacy_settled_row_is_pulled_to_book_truth(tmp_path: Path) -> None:
+    create_ms = _ms(datetime(2026, 10, 28, 12, 0, 2, tzinfo=timezone.utc))
+    add_legacy_settled(tmp_path, "legacy1", iso_within(create_ms), 2.4, 10.0, "lost")
+    # a fresh ledger replays with status lost, pnl 0, settle_source 'external'
+    ledger = BetLedger(LedgerConfig(), log_path=str(tmp_path / "ledger.jsonl"))
+    bet = next(b for b in ledger.all_bets() if b["bet_id"] == "legacy1")
+    assert bet["status"] == "lost" and bet["pnl_ngn"] == 0.0
+
+    create_ms = _ms(datetime(2026, 10, 28, 12, 0, 2, tzinfo=timezone.utc))
+    # THE BOOK ACTUALLY WON IT: payout 24.00 on 10 at 2.4
+    write_state(
+        tmp_path,
+        [raw_ticket("261028120002ordLG1", create_ms, 10.0, 2.4, 24.0, 20, outcome="1")],
+        fetched="2026-11-02T00:00:00+00:00",
+    )
+
+    report = run_reconcile(ledger, tmp_path / "ledger.jsonl", tmp_path / "settle_state.json")
+    assert report["ressettled"]["won"] == 1
+    assert report["changed"] == 1
+    after = next(b for b in ledger.all_bets() if b["bet_id"] == "legacy1")
+    # stale 'lost'/0 was corrected to 'won'/+14 by the book's truth
+    assert after["status"] == "won"
+    assert after["pnl_ngn"] == pytest.approx(14.0)
+    assert after["settle_source"] == "sportybet_bet_history"
+    assert after["book_status"].startswith("order:20:")
+
+
+def test_legacy_already_consistent_is_untouched(tmp_path: Path) -> None:
+    create_ms = _ms(datetime(2026, 10, 28, 13, 0, 1, tzinfo=timezone.utc))
+    add_legacy_settled(tmp_path, "legacy2", iso_within(create_ms), 1.9, 25.0, "lost")
+    ledger = BetLedger(LedgerConfig(), log_path=str(tmp_path / "ledger.jsonl"))
+    log = tmp_path / "ledger.jsonl"
+
+    create_ms = _ms(datetime(2026, 10, 28, 13, 0, 1, tzinfo=timezone.utc))
+    write_state(
+        tmp_path,
+        [raw_ticket("261028130001ordLG2", create_ms, 25.0, 1.9, 0.0, 30, outcome="2")],
+        fetched="2026-11-02T00:00:00+00:00",
+    )
+    with open(log, encoding="utf-8") as f:
+        before = sum(1 for line in f if line.strip())
+
+    report = run_reconcile(ledger, log, tmp_path / "settle_state.json")
+    # book also says lost; stake returned 0 → book pnl −25 == stale local −25? legacy pnl was 0,
+    # so the book's −25 DIFFERS and must be applied — this is the 'already consistent' noop ONLY
+    # when the worth agrees: here it doesn't, so it MUST resettle.
+    assert report["ressettled"]["lost"] == 1
+    after = next(b for b in ledger.all_bets() if b["bet_id"] == "legacy2")
+    assert after["pnl_ngn"] == pytest.approx(-25.0)
+
+    # second pass: the corrected bet is no longer in the legacy review set
+    # (stale 'external' rows are; book-settled rows are not) — counters stay
+    # zero, the ledger keeps its book truth and the file adds no rows
+    with open(log, encoding="utf-8") as f:
+        after_first = sum(1 for line in f if line.strip())
+    report2 = run_reconcile(ledger, log, tmp_path / "settle_state.json")
+    assert report2["ressettled"] == {"won": 0, "lost": 0, "void": 0, "already_consistent": 0}
+    assert report2["changed"] == 0
+    with open(log, encoding="utf-8") as f:
+        after_second = sum(1 for line in f if line.strip())
+    assert after_second == after_first
+    after2 = next(b for b in ledger.all_bets() if b["bet_id"] == "legacy2")
+    assert after2["pnl_ngn"] == pytest.approx(-25.0)
+    assert after2["status"] == "lost"
+
+
+# --------------------------------------------------------------------------
 # pure payout helper
 
 

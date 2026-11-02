@@ -402,6 +402,37 @@ class BetLedger:
             self._append(bet, "bet_settled")
             return bet.to_dict()
 
+    def record_book_ressettle(
+        self,
+        bet_id: str,
+        status: str,
+        payout_ngn: float,
+        book_status: str,
+        source: str = "sportybet_bet_history",
+    ) -> dict:
+        """Reconcile-time correction: an ALREADY-SETTLED bet whose outcome
+        was written before the book's truth existed (the legacy era where
+        status was recorded but pnl stayed 0). Overwrites with the book's
+        outcome and amounts — the same payout-path arithmetic — and
+        appends under the same `bet_settled` event so the replay applies
+        it as the update it is. Distinct from record_book_settle, which
+        is strictly idempotent for the open path."""
+        if status not in SETTLED_STATUSES:
+            raise ValueError(f"Invalid settle status: {status!r}. Must be one of {SETTLED_STATUSES}")
+        with self._lock:
+            bet = self._bets.get(bet_id)
+            if bet is None:
+                raise KeyError(f"Unknown bet_id: {bet_id}")
+            payout = round(float(payout_ngn), 2)
+            bet.status = status
+            bet.settled_at = bet.settled_at or datetime.now(timezone.utc).isoformat()
+            bet.settle_ngn = payout
+            bet.book_status = book_status
+            bet.settle_source = source
+            bet.pnl_ngn = round(payout - bet.stake_ngn, 2)
+            self._append(bet, "bet_settled")
+            return bet.to_dict()
+
     def book_unsettle(self, bet_id: str) -> None:
         """Operator guard-rail: reopen a bet that was settled by a WRONG
         reconcile (e.g. a bad match). Records the reopen; PnL is zeroed and

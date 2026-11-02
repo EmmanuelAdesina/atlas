@@ -231,18 +231,29 @@ def reconcile(
     ledger = BetLedger(LedgerConfig(), log_path=str(ledger_path))
     all_bets = ledger.all_bets()
     open_bets = [b for b in all_bets if b.get("status") not in SETTLED_STATUSES]
+    # Legacy-era settlements: status was recorded before the book's truth
+    # existed, so pnl stayed 0 and settle_source is None/'external'. They
+    # are reviewed the same way (book truth overrides stale guesses),
+    # while any bet the BOOK path settled stays untouched (idempotency).
+    retro_bets = [
+        b for b in all_bets
+        if b.get("status") in SETTLED_STATUSES
+        and b.get("settle_source") in (None, "", "external")
+    ]
 
-    pairs = match_candidates(open_bets, tickets)
+    pairs = match_candidates(open_bets + retro_bets, tickets)
     matched, amb = assign_bijective(pairs)
 
     report: dict[str, Any] = {
         "state_fetched_at": state.get("fetched_at"),
         "state_source": src,
         "open_bets": len(open_bets),
+        "legacy_settled_reviewed": len(retro_bets),
         "tickets_in_state": len(tickets),
         "candidate_pairs": len(pairs),
         "ambiguity": amb,
         "settled": {"won": 0, "lost": 0, "void": 0},
+        "ressettled": {"won": 0, "lost": 0, "void": 0, "already_consistent": 0},
         "changed": 0,
         "matched": [],
         "unmatched_bets": [],
@@ -282,6 +293,44 @@ def reconcile(
             )
             continue
 
+        placed = _parse_iso(bet.get("placed_at"))
+        created = _ticket_time(ticket)
+        delta_s = round((created - placed).total_seconds(), 3) if placed and created else None
+
+        is_legacy = bet.get("status") in SETTLED_STATUSES
+
+        if is_legacy:
+            # Retro-settle: only touch it when the book truth disagrees
+            # with what the stale local settlement recorded.
+            expected_pnl = round(payout - float(bet.get("stake_ngn") or 0.0), 2)
+            if (
+                bet.get("status") == status
+                and abs(float(bet.get("pnl_ngn") or 0.0) - expected_pnl) < 0.005
+            ):
+                report["ressettled"]["already_consistent"] += 1
+                continue
+            ledger.record_book_ressettle(
+                bet_id=bet_id,
+                status=status,
+                payout_ngn=payout,
+                book_status=f"order:{ticket.get('winning_status')}:{order_id}",
+                source=SETTLE_SOURCE,
+            )
+            report["ressettled"][status] += 1
+            report["changed"] += 1
+            report["matched"].append(
+                {
+                    "bet_id": bet_id,
+                    "order_id": order_id,
+                    "status": status,
+                    "stake_ngn": bet.get("stake_ngn"),
+                    "payout_ngn": round(payout, 2),
+                    "pnl_ngn": expected_pnl,
+                    "delta_s": delta_s,
+                }
+            )
+            continue
+
         ledger.record_book_settle(
             bet_id=bet_id,
             status=status,
@@ -301,9 +350,7 @@ def reconcile(
                 "stake_ngn": bet.get("stake_ngn"),
                 "payout_ngn": round(payout, 2),
                 "pnl_ngn": round(payout - float(bet.get("stake_ngn") or 0.0), 2),
-                "delta_s": round((created - placed).total_seconds(), 3)
-                if placed and created
-                else None,
+                "delta_s": delta_s,
             }
         )
 
@@ -346,8 +393,16 @@ def _print_report(report: dict, cap: int = 15) -> None:
         f"(api {src.get('api')}, session {src.get('session')})"
     )
     print(f"  open bets entering: {report['open_bets']}")
+    print(
+        f"  legacy settled reviewed: {report.get('legacy_settled_reviewed', 0)} "
+        f"(stale statuses reviewed against the book)"
+    )
     print(f"  candidate pairs: {report['candidate_pairs']}  ambiguity: {json.dumps(report['ambiguity'], sort_keys=True)}")
-    print(f"  settled: {json.dumps(report['settled'], sort_keys=True)}  changed={report['changed']}")
+    print(
+        f"  settled: {json.dumps(report['settled'], sort_keys=True)}  "
+        f"ressettled: {json.dumps(report['ressettled'], sort_keys=True)}  "
+        f"changed={report['changed']}"
+    )
     matched = report["matched"]
     print(f"  matched {len(matched)}:")
     for item in matched[:cap]:
