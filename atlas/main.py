@@ -1041,10 +1041,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--bankroll",
         type=float,
-        default=100_000.0,
-        help="Bankroll the stakes are sized against (NGN). Set this to the "
-             "real account balance: the gap guard plus a 0.10 Kelly fraction "
-             "cannot justify a NGN 100 minimum bet on a small bankroll.",
+        default=0.0,
+        help="Bankroll ceiling the stakes are sized against (NGN). 0 (the "
+             "default) means the OBSERVED account balance is the whole "
+             "figure — no fantasy ceiling; with no observed balance yet "
+             "and a 0.10 Kelly fraction no stake is justifiable.",
     )
     run.add_argument(
         "--supervisor-log",

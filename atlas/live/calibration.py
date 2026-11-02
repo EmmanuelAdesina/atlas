@@ -176,13 +176,22 @@ class CalibrationMap:
     def calibrate(self, market_key: str, model_p: float) -> float:
         """Return calibrated probability for a market key and raw model_p.
 
-        If the family has insufficient observations, returns raw model_p
-        (no calibration). Clamps to [0, 1].
+        If the family has insufficient evidence (no fit, empty fit, or
+        counts below `min_obs` — i.e. `is_calibrated()` False), returns
+        RAW model_p: never isotonic-extrapolate a thin bucket. A family
+        whose few observations all won fits a step tail of ys==1.0 and
+        would otherwise price a fantasy p=1.000 (the 2026-11-02 fix;
+        that degenerate tail is what sized the Nashville blast through
+        fractional_kelly_stake). Clamps to [0, 1].
         """
         family = self._family_key(market_key)
         fit = self._maps.get(family)
 
-        if not fit or len(fit[0]) == 0:
+        if (
+            not fit
+            or len(fit[0]) == 0
+            or not self.is_calibrated(market_key)
+        ):
             # Insufficient data — return raw model_p.
             return max(0.0, min(1.0, model_p))
 

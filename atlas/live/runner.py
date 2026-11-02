@@ -118,6 +118,31 @@ FINISHED_MARKERS = (
 )
 
 
+def effective_bankroll(bankroll_ngn: float, balance_observed) -> float:
+    """The sizing bankroll, from the observed wallet — never a fantasy.
+
+    The OBSERVED account balance is the real ceiling ('the higher the
+    amount available, the higher the stake; the lower, the lower'). An
+    explicit --bankroll figure can only LOWER it (a ceiling, nothing
+    more). --bankroll <= 0 (the unit's operator stance and the argparse
+    default) means the observed balance IS the figure; with no valid
+    observation at all it yields 0 — a 0 bankroll stakes nothing, which
+    is the fail-closed direction (the fantasy --bankroll 100000 default
+    that sized NGN 21-27 past the NGN-10 flat cap is retired, 2026-11-02).
+    """
+    observed = (
+        balance_observed
+        if isinstance(balance_observed, (int, float))
+        and balance_observed > 0
+        else None
+    )
+    if observed is not None:
+        if bankroll_ngn and bankroll_ngn > 0:
+            return min(float(bankroll_ngn), float(observed))
+        return float(observed)
+    return max(0.0, float(bankroll_ngn) if bankroll_ngn else 0.0)
+
+
 @dataclass
 class CycleReport:
     """What one loop cycle did."""
@@ -1787,10 +1812,12 @@ class LiveRunner:
             # --bankroll figure: 'the higher the amount available, the higher
             # the stake; the lower, the lower' — the drop to NGN 49 after
             # losses must shrink the stake math the same way growth raises it.
-            bankroll = self.policy.bankroll_ngn
-            if isinstance(self._balance_observed, (int, float)) and self._balance_observed > 0:
-                bankroll = min(bankroll, self._balance_observed)
-            base_config = replace(base_config, bankroll_ngn=bankroll)
+            base_config = replace(
+                base_config,
+                bankroll_ngn=effective_bankroll(
+                    self.policy.bankroll_ngn, self._balance_observed
+                ),
+            )
         portfolio = SequentialPortfolio(
             self.posture.apply_to(base_config)
         )

@@ -135,24 +135,65 @@ def test_proven_with_clv(tmp_path, monkeypatch):
     assert v["clv_pct"] == 0.0
 
 
-def test_frozen_is_fail_closed_on_any_non_proven_state(tmp_path, monkeypatch):
-    """MISSING / UNREADABLE / collect / watch / observe — every state that
-    is not an explicit 'proven' verdict freezes real money. The old
-    explicitly-open rule is how this session bet real NGN at collect
-    n=0; this test pins the inversion."""
+def test_frozen_is_fail_closed_on_any_unarmed_state(tmp_path, monkeypatch):
+    """MISSING / UNREADABLE / collect / watch / observe / false-arm — every
+    state that is not explicitly 'proven' OR explicitly operator-armed
+    freezes real money. The inversion is the fail-closed default; the
+    operator's deliberate arm is the single sanctioned override."""
     monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
     assert campaign.frozen() is True  # missing file
     campaign.STATE_FILE.write_text("{not json", encoding="utf-8")
     assert campaign.frozen() is True  # unreadable file
-    for action in ("collect", "watch", "observe"):
-        campaign.STATE_FILE.write_text(
-            json.dumps({"action": action}), encoding="utf-8"
-        )
-        assert campaign.frozen() is True, action
+    for state in (
+        {"action": "collect"},
+        {"action": "watch"},
+        {"action": "observe"},
+        {"action": "observe", "operator_arm": True},
+        {"action": "collect", "operator_arm": False},
+        {"action": "collect", "operator_arm": "true"},
+        {},
+    ):
+        campaign.STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        assert campaign.frozen() is True, state
+    for state in (
+        {"action": "proven"},
+        {"action": "collect", "operator_arm": True},
+        {"action": "watch", "operator_arm": True},
+    ):
+        campaign.STATE_FILE.write_text(json.dumps(state), encoding="utf-8")
+        assert campaign.frozen() is False, state
+
+
+def test_refresh_state_file_preserves_operator_arm(
+    tmp_path, monkeypatch, real_campaign_scorer
+):
+    """The operator's arm must survive every verdict refresh (refresh runs
+    each reconcile) — and refresh must never SET it out of thin air."""
+    monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
+    campaign.STATE_FILE.write_text(
+        json.dumps({"action": "proven", "operator_arm": True}),
+        encoding="utf-8",
+    )
+    refresh_v = campaign.refresh_state_file(
+        make_ledger_with(tmp_path / "led", [-10.0] * 5)
+    )
+    assert refresh_v["action"] == "collect"
+    # arm retained, verdict honestly collect → wall OPEN by operator order
+    assert refresh_v["operator_arm"] is True
+    assert campaign.frozen() is False
+    assert json.loads(
+        campaign.STATE_FILE.read_text(encoding="utf-8")
+    )["operator_arm"] is True
+
+    # no arm written beforehand → refresh never invents one
     campaign.STATE_FILE.write_text(
         json.dumps({"action": "proven"}), encoding="utf-8"
     )
-    assert campaign.frozen() is False  # the only open state
+    led2 = make_ledger_with(tmp_path / "led2", [-10.0] * 5)
+    v2 = campaign.refresh_state_file(led2)
+    assert v2["action"] == "collect"
+    assert "operator_arm" not in v2
+    assert campaign.frozen() is True
 
 
 def test_refresh_state_file_below_min_n_returns_collect(
@@ -203,9 +244,10 @@ def test_ledger_refuses_placement_when_frozen(tmp_path, monkeypatch):
 
 
 def test_ledger_refuses_placement_when_verdict_watch(tmp_path, monkeypatch):
-    """FAIL-CLOSED: under the old rule 'watch' traded real money while
-    collecting; under the inversion only 'proven' trades. Collect-phase
-    evidence is the paper stream, not the wallet."""
+    """FAIL-CLOSED: bare 'watch' (no operator arm) never trades real
+    money while collecting; under the inversion the wall opens only on
+    'proven' or an explicit operator_arm. Collect-phase evidence without
+    an order is the paper stream, not the wallet."""
     monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
     campaign.STATE_FILE.write_text(
         json.dumps({"action": "watch"}), encoding="utf-8"
@@ -218,11 +260,27 @@ def test_ledger_refuses_placement_when_verdict_watch(tmp_path, monkeypatch):
 
 
 def test_ledger_allows_placement_when_proven(tmp_path, monkeypatch):
-    """The only state that opens the wall: the pre-registered verdict
+    """The verdict side that opens the wall: the pre-registered verdict
     reads 'proven' — edge confirmed at the MIN_N bar."""
     monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
     campaign.STATE_FILE.write_text(
         json.dumps({"action": "proven"}), encoding="utf-8"
+    )
+    led = BetLedger(LedgerConfig(), log_path=str(tmp_path / "l.jsonl"))
+    assert led.can_place_bet(10.0) is True
+    assert led.place_bet(make_bet("b1")) is True
+
+
+def test_ledger_allows_placement_when_collect_operator_armed(
+    tmp_path, monkeypatch
+):
+    """The operator-override side of the wall: collect + operator_arm is
+    the deliberately ordered live-collection state (NGN-10 flat campaign)
+    — the LAST wall reads it too, so submission actually runs."""
+    monkeypatch.setattr(campaign, "STATE_FILE", tmp_path / "state.json")
+    campaign.STATE_FILE.write_text(
+        json.dumps({"action": "collect", "operator_arm": True}),
+        encoding="utf-8",
     )
     led = BetLedger(LedgerConfig(), log_path=str(tmp_path / "l.jsonl"))
     assert led.can_place_bet(10.0) is True

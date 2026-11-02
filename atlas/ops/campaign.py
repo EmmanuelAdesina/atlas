@@ -226,8 +226,21 @@ def verdict_from_ledger(ledger) -> dict:
 
 
 def refresh_state_file(ledger) -> dict:
-    """Recompute the verdict and persist it for the placement gates."""
+    """Recompute the verdict and persist it for the placement gates.
+
+    PRESERVES an existing `operator_arm` flag across rewrites: the re-arm
+    is the operator's deliberate order, not the engine's, and refresh runs
+    on every reconcile — it must never silently strip it. This function
+    never SETS operator_arm; it only reads and retains what the operator
+    wrote by hand.
+    """
     v = verdict_from_ledger(ledger)
+    try:
+        prev = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        prev = None
+    if isinstance(prev, dict) and "operator_arm" in prev:
+        v["operator_arm"] = prev["operator_arm"]
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(v, indent=1), encoding="utf-8")
@@ -236,19 +249,33 @@ def refresh_state_file(ledger) -> dict:
 
 
 def frozen() -> bool:
-    """FAIL-CLOSED: real money requires the verdict to say 'proven'.
+    """FAIL-CLOSED money gate with ONE deliberate operator override.
 
-    Missing state, unparsable state, and every action other than 'proven'
-    (collect / watch / observe) freeze real-money placement. This is the
-    2026-11-01 inversion of the original explicitly-open rule (frozen only
-    on 'observe' — open through the entire collection phase by
-    construction, which is how this session spent real money at collect
-    n=0). Under observe-first, the collect-phase evidence is the paper
-    stream; the paper-verdict engine that can honestly produce 'proven'
-    from reconciled paper outcomes is the component that re-opens money.
+    Opens only when the persisted state says either:
+
+      - action == 'proven'                       (the verdict says so), or
+      - action in ('collect', 'watch') AND operator_arm is True
+        (the operator read the verdict, accepted its weakness, and
+        explicitly ordered live collection — the NGN-10 flat campaign).
+
+    Everything else freezes: missing state, unparsable state, 'observe'
+    (permanent, EVEN with operator_arm — the fail-closed default),
+    operator_arm absent/false. This carries the 2026-11-01 inversion of
+    the open-through-collection rule; 'operator_arm' (2026-11-02) is the
+    only sanctioned way to collect live WITHOUT faking a 'proven'.
+
+    operator_arm is written ONLY by the operator (a hand edit of the
+    state file) — refresh_state_file preserves but never sets it.
     """
     try:
         v = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return True
-    return v.get("action") != "proven"
+    if not isinstance(v, dict):
+        return True
+    action = v.get("action")
+    if action == "proven":
+        return False
+    if action in ("collect", "watch") and v.get("operator_arm") is True:
+        return False
+    return True

@@ -316,17 +316,254 @@ def _wait_ready(adapter: WebBridgeAdapter, max_wait_s: float = 75.0) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# CDP transport — probe-proven 2026-11-02 (264 tickets, one session cdp-9222)
+# ---------------------------------------------------------------------------
+
+CDP_DEBUG_HOST = "http://127.0.0.1:9222"
+CDP_READY_BODY_MIN_CHARS = 900
+
+
+class _CDPTab:
+    """Minimal CDP driver for tab control + Runtime.evaluate.
+
+    Chrome 156 ignores `/json/new?url=` — a blank target is created and
+    navigated over the websocket (probe-proven; URL-carrying variants
+    receive about:blank).
+    """
+
+    def __init__(self, debug_host: str):
+        import websocket  # VPS venv: pip install --no-deps websocket-client
+
+        self._ws_mod = websocket
+        targets = _http_json(debug_host + "/json/new", method="PUT")
+        self.id = targets.get("id") or ""
+        self._ws = websocket.create_connection(
+            targets["webSocketDebuggerUrl"], timeout=90
+        )
+        self._mid = 0
+
+    def call(self, method: str, params: Optional[dict] = None, timeout: Optional[float] = None):
+        self._mid += 1
+        tid = self._mid
+        self._ws.send(json.dumps({"id": tid, "method": method, "params": params or {}}))
+        if timeout:
+            self._ws.settimeout(timeout)
+        while True:
+            msg = json.loads(self._ws.recv())
+            if msg.get("id") == tid:
+                self._ws.settimeout(90)
+                if "error" in msg:
+                    raise WebBridgeError(
+                        f"cdp {method}: {msg['error']}", transient=True
+                    )
+                return msg.get("result") or {}
+            # events are noise here
+
+    def evaluate(self, expression: str):
+        res = self.call(
+            "Runtime.evaluate",
+            {"expression": expression, "returnByValue": True, "userGesture": True},
+        )
+        return res.get("result") or {}
+
+    def close(self) -> None:
+        try:
+            self.call("Page.close")
+        except Exception:
+            pass
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+
+
+def _http_json(url: str, method: str = "GET") -> dict:
+    from urllib.request import Request, urlopen
+
+    req = Request(url, method=method)  # noqa: S310 — local debug endpoint only
+    with urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode() or "{}")
+
+
+def _wait_ready_cdp(tab: _CDPTab, max_wait_s: float = 120.0) -> None:
+    """CDP readiness gate (probe-proven: history SPA body >= 900 chars)."""
+    deadline = time.time() + max_wait_s
+    last: Any = None
+    while time.time() < deadline:
+        try:
+            v = json.loads(tab.evaluate(
+                "JSON.stringify({rs: document.readyState,"
+                " url: location.href,"
+                " len: (document.body ? document.body.innerText.length : 0)})"
+            ).get("value") or "{}")
+            last = v
+            if (
+                HISTORY_PATH_HINT in str(v.get("url") or "")
+                and int(v.get("len") or 0) >= CDP_READY_BODY_MIN_CHARS
+                and v.get("rs") in ("complete", "interactive")
+            ):
+                return
+        except (WebBridgeError, OSError):
+            raise
+        except Exception:
+            last = str(last)[:120]
+        time.sleep(3.0)
+    raise WebBridgeError(
+        f"cdp: bet history page never reached readiness; last {json.dumps(last)[:200]}",
+        transient=True,
+    )
+
+
+def _fetch_page_cdp(tab: _CDPTab, page_no: int) -> dict:
+    """One API page through the SAME sync-XHR shape the extension uses."""
+    raw = tab.evaluate(_build_page_js(page_no))
+    if not (isinstance(raw, dict) and raw.get("value")):
+        raise WebBridgeError(
+            f"cdp bet history page {page_no}: unexpected evaluate result "
+            f"{str(raw)[:120]!r}",
+            transient=True,
+        )
+    wrapper = json.loads(raw["value"])
+    if wrapper.get("s") != 200 or wrapper.get("e"):
+        raise WebBridgeError(
+            f"cdp bet history page {page_no}: HTTP {wrapper.get('s')} "
+            f"{str(wrapper.get('e') or '')[:120]}",
+            transient=True,
+        )
+    body = wrapper.get("b") or ""
+    try:
+        payload = json.loads(body)
+    except Exception as exc:
+        raise WebBridgeError(
+            f"cdp bet history page {page_no}: unparseable body head {body[:160]!r}",
+            transient=True,
+        ) from exc
+    if payload.get("bizCode") != 10000:
+        raise WebBridgeError(
+            f"cdp bet history page {page_no}: bizCode={payload.get('bizCode')} "
+            f"message={str(payload.get('message'))[:120]!r}",
+            transient=True,
+        )
+    data = payload.get("data") or {}
+    if not isinstance(data.get("entityList"), list):
+        raise WebBridgeError(
+            f"cdp bet history page {page_no}: missing data.entityList",
+            transient=True,
+        )
+    return data
+
+
+def _build_state(
+    raw_rows: list[dict],
+    pages_fetched: int,
+    total_num: int,
+    session: str,
+    transport: str,
+) -> dict:
+    """Normalize + dedupe + assemble — the exact same settle_state.json either way."""
+    tickets = [parse_ticket(row) for row in raw_rows]
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for t in tickets:
+        oid = t.get("order_id") or ""
+        if oid and oid in seen:
+            continue
+        if oid:
+            seen.add(oid)
+        unique.append(t)
+
+    enum_counts: dict[str, int] = {}
+    for t in unique:
+        enum_counts[t["status"]] = enum_counts.get(t["status"], 0) + 1
+
+    return {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "source": {
+            "api": API_PATH,
+            "host": "www.sportybet.com",
+            "filter": "isSettled=10",
+            "transport": transport,
+            "session": session,
+            "pages_fetched": pages_fetched,
+            "page_size": PAGE_SIZE,
+        },
+        "total_num": total_num,
+        "count": len(unique),
+        "ticket_status_enum": enum_counts,
+        "tickets": unique,
+    }
+
+
+def _scrape_cdp(out: Path, max_pages: int) -> dict:
+    """CDP transport: navigate the history SPA, same-origin sync XHRs.
+
+    Spin-off failure is WebBridgeError(too) so the hourly unit's skip
+    logic is transport-agnostic. Read-only: no betslips, no clicks, no
+    money; the target is closed afterwards (memory hygiene).
+    """
+    try:
+        import websocket  # noqa: F401 — lazily: only present in the VPS venv
+    except ImportError as exc:
+        raise WebBridgeError(
+            "cdp transport needs 'websocket-client' in the venv "
+            "(pip install --no-deps websocket-client)",
+            transient=True,
+        ) from exc
+
+    debug_host = os.environ.get("ATLAS_CDP_HOST", CDP_DEBUG_HOST)
+    try:
+        tab = _CDPTab(debug_host)
+    except Exception as exc:  # chrome down / port closed: skip, not page
+        raise WebBridgeError(
+            f"cdp: no debug target on {debug_host}: {str(exc)[:160]}",
+            transient=True,
+        ) from exc
+
+    try:
+        tab.call("Page.navigate", {"url": HISTORY_URL}, timeout=30)
+        _wait_ready_cdp(tab)
+        data = _fetch_page_cdp(tab, 1)
+        total_num = int(data.get("totalNum") or len(data.get("entityList") or []))
+        pages_needed = max(1, (total_num + PAGE_SIZE - 1) // PAGE_SIZE)
+        if max_pages > 0:
+            pages_needed = min(pages_needed, max_pages)
+
+        raw_rows: list[dict] = []
+        for page_no in range(1, pages_needed + 1):
+            if page_no > 1:
+                time.sleep(0.6)
+                data = _fetch_page_cdp(tab, page_no)
+            raw_rows.extend(data.get("entityList") or [])
+    finally:
+        tab.close()
+
+    state = _build_state(raw_rows, pages_needed, total_num, "cdp-9222", "cdp")
+    _write_atomic(out, state)
+    return state
+
+
 def scrape(
     session: Optional[str] = None,
     daemon_url: Optional[str] = None,
     out_path: Optional[str] = None,
     max_pages: Optional[int] = None,
+    transport: Optional[str] = None,
 ) -> dict:
     """Read the book's full settled Bet History and write settle_state.json.
 
     Returns the state dict that was written. Raises WebBridgeError when
-    the browser/extension stack is down — callers (e.g. the hourly
-    oneshot unit) may treat that as a skip.
+    both transports are unavailable — callers (e.g. the hourly oneshot
+    unit) may treat that as a skip.
+
+    Transports (`ATLAS_BET_HISTORY_TRANSPORT` = extension | cdp | auto):
+
+      - extension: the daemon/extension path (the live-board proven path).
+      - cdp: Chrome DevTools protocol directly on the logged-in profile
+        (probes proved the daemon wedge, not the site — this bypasses it;
+        probe-proven 2026-11-02, 264 tickets).
+      - auto (default): extension first, CDP on extension failure — the
+        durable path on the memory-squeezed box.
     """
     session = session or os.environ.get(
         "ATLAS_SETTLE_SESSION", "atlas-recon-history"
@@ -338,15 +575,40 @@ def scrape(
             f"browser session {session!r}"
         )
 
-    daemon_url = daemon_url or os.environ.get(
-        "ATLAS_WEBBRIDGE_DAEMON_URL", DEFAULT_DAEMON_URL
-    )
     out = Path(out_path) if out_path else ROOT / "data" / "ops" / "settle_state.json"
 
     cap = max_pages
     if cap is None:
         cap = int(os.environ.get("ATLAS_BET_HISTORY_MAX_PAGES", "0") or 0)
 
+    transport = (
+        transport
+        or os.environ.get("ATLAS_BET_HISTORY_TRANSPORT", "auto")
+        or "auto"
+    ).strip().lower()
+
+    if transport == "cdp":
+        return _scrape_cdp(out=out, max_pages=cap)
+
+    try:
+        return _scrape_extension(session, daemon_url, out, cap)
+    except WebBridgeError:
+        if transport != "auto":
+            raise
+        # auto: fall through to the probe-proven CDP path
+        return _scrape_cdp(out=out, max_pages=cap)
+
+
+def _scrape_extension(
+    session: str,
+    daemon_url: Optional[str],
+    out: Path,
+    cap: int,
+) -> dict:
+    """The original daemon/extension transport (see module docstring)."""
+    daemon_url = daemon_url or os.environ.get(
+        "ATLAS_WEBBRIDGE_DAEMON_URL", DEFAULT_DAEMON_URL
+    )
     adapter = WebBridgeAdapter(session=session, daemon_url=daemon_url)
 
     _open_history_tab(adapter)

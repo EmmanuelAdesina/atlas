@@ -11,11 +11,15 @@ Environment=HOME=/home/reliastra
 Environment=DISPLAY=:0
 # RAM discipline: this cgroup eats the squeeze FIRST so prod never OOMs.
 # Kill here is cheap: watchdog restarts Chrome, profile persists.
-ExecStart=/usr/bin/google-chrome --user-data-dir=/opt/atlas/chrome-profile --no-first-run --no-default-browser-check --start-maximized --force-renderer-accessibility --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --js-flags=--max-old-space-size=384 about:blank
+ExecStart=/usr/bin/google-chrome \
   --user-data-dir=/opt/atlas/chrome-profile \
   --no-first-run --no-default-browser-check \
+  --start-maximized --force-renderer-accessibility \
+  --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
   --disable-gpu --disable-dev-shm-usage \
   --disk-cache-size=33554432 \
+  --js-flags=--max-old-space-size=384 \
+  --remote-debugging-port=9222 \
   --window-position=0,0 --window-size=1920,1080 \
   about:blank
 Restart=always

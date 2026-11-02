@@ -14,10 +14,13 @@ Conflicts=atlas-shadow.service
 Type=simple
 WorkingDirectory=/opt/atlas
 EnvironmentFile=/opt/atlas/.env
-# --submit ARMED. Stakes: operator NGN 10 flat regime (capped in posture);
-# bankroll is a CEILING only - the real observed account balance clamps it.
+# --submit ARMED. Stakes: operator NGN 10 FLAT regime (--max-stake 10 AND
+# --min-stake 10 pin floor AND cap; nothing else can size a stake); the
+# sizing bankroll is the OBSERVED account balance (the fantasy
+# --bankroll 100000 that sized the Nashville blast is retired — argparse
+# default 0 now means observed-balance-only).
 # The hard daily stop resets at 00:00 UTC (= 01:00 Lagos).
-ExecStart=/opt/atlas/.venv/bin/python -m atlas.main run --submit --cycle-seconds 30 --bankroll 100000 --daily-loss-limit -200 --ledger data/ops/ledger.jsonl
+ExecStart=/opt/atlas/.venv/bin/python -m atlas.main run --submit --cycle-seconds 30 --max-stake 10 --min-stake 10 --daily-loss-limit -200 --ledger data/ops/ledger.jsonl
 Restart=always
 RestartSec=15
 TimeoutStopSec=30
