@@ -236,6 +236,14 @@ def _open_history_tab(adapter: WebBridgeAdapter) -> None:
     """
     created = False
     last_err = "navigate returned success but the tab never appeared in the session registry"
+
+    # An earlier run may already hold a Bet History tab in this session —
+    # reuse it instead of opening another one every hourly pass (the box is
+    # memory-constrained; every idle tab is real RAM).
+    found = _find_history_tab(adapter)
+    if found is not None:
+        return
+
     for hint_try in (1, 2):
         try:
             adapter.navigate(HISTORY_URL, new_tab=True)
@@ -344,19 +352,27 @@ def scrape(
     _open_history_tab(adapter)
     _wait_ready(adapter)
 
-    # Page 1 fixes the total; later pages follow it.
-    data = _fetch_page(adapter, 1)
-    total_num = int(data.get("totalNum") or len(data.get("entityList") or []))
-    pages_needed = max(1, (total_num + PAGE_SIZE - 1) // PAGE_SIZE)
-    if cap > 0:
-        pages_needed = min(pages_needed, cap)
+    try:
+        # Page 1 fixes the total; later pages follow it.
+        data = _fetch_page(adapter, 1)
+        total_num = int(data.get("totalNum") or len(data.get("entityList") or []))
+        pages_needed = max(1, (total_num + PAGE_SIZE - 1) // PAGE_SIZE)
+        if cap > 0:
+            pages_needed = min(pages_needed, cap)
 
-    raw_rows: list[dict] = []
-    for page_no in range(1, pages_needed + 1):
-        if page_no > 1:
-            time.sleep(0.6)
-            data = _fetch_page(adapter, page_no)
-        raw_rows.extend(data.get("entityList") or [])
+        raw_rows: list[dict] = []
+        for page_no in range(1, pages_needed + 1):
+            if page_no > 1:
+                time.sleep(0.6)
+                data = _fetch_page(adapter, page_no)
+            raw_rows.extend(data.get("entityList") or [])
+    finally:
+        # Recon hygiene: release the tab and its RAM; the account page state
+        # (cookies/session) lives in the browser profile, not the tab.
+        try:
+            adapter.close_session()
+        except Exception:
+            pass
 
     tickets = [parse_ticket(row) for row in raw_rows]
 
