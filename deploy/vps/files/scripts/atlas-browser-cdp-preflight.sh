@@ -31,9 +31,16 @@ fi
 
 logger -t atlas-cdp-preflight "devtools wedged — recycling atlas-browser before scrape"
 systemctl restart atlas-browser
-sleep 14
 
-if cdp_ok; then
+# Chrome takes ~40s to fully init under this box's memory pressure (the
+# fixed 14s sleep probed mid-boot). Poll up to 60s instead of hoping.
+RECOVERED=0
+for _ in $(seq 1 12); do
+  sleep 5
+  if cdp_ok; then RECOVERED=1; break; fi
+done
+
+if [ "$RECOVERED" = "1" ]; then
   logger -t atlas-cdp-preflight "devtools recovered after recycle"
   exit 0
 fi
