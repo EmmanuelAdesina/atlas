@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from dataclasses import replace
 import time
 from datetime import datetime
@@ -26,6 +27,7 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
+from typing import Any
 
 from atlas.collectors.sportybet import SportyBetCollector
 from atlas.live.boss import BossController, diagnose_live_operation
@@ -120,6 +122,8 @@ def _build_state_from_fixture(fixture: dict, observed_at: datetime) -> LiveMatch
 
 def cmd_live_demo(args: argparse.Namespace) -> int:
     """Replay a recorded fixture through the sub-millisecond Fast-Plane intelligence loop."""
+    from atlas.ops.posture import DEFAULT_POSTURE, posture_for_mode, propose_posture
+
     try:
         fixture = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -256,13 +260,11 @@ def cmd_live_demo(args: argparse.Namespace) -> int:
         _, cal = grade_decisions(
             [d.__dict__ for d in decisions_made],
             settled_outcomes=settled,
-            default_match_id=match_id,
         )
         console.print(
             f"[bold]Post-Settlement Calibration (§8):[/bold] "
             f"settled={cal.settled_records}, Brier={cal.brier_score:.4f}, "
-            f"LogLoss={cal.log_loss:.4f}, mean_p={cal.mean_predicted_p:.3f}, "
-            f"win_rate={cal.realized_win_rate:.3f}"
+            f"LogLoss={cal.log_loss:.4f}"
         )
 
     console.print(f"Decision log: {args.log} (execution disabled in V1)")
@@ -275,6 +277,8 @@ def cmd_live_demo(args: argparse.Namespace) -> int:
 
 
 def cmd_boss(args: argparse.Namespace) -> int:
+    """Slow-plane Executive Portfolio Manager / CRO diagnostics & calibration report."""
+    from atlas.ops.posture import DEFAULT_POSTURE, posture_for_mode, propose_posture
     """Slow-plane Executive Portfolio Manager JSON diagnostics & calibration output."""
     fixture = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
     match_id = fixture["match_id"]
@@ -390,6 +394,31 @@ def cmd_posture(args: argparse.Namespace) -> int:
     return 0
 
 
+def _select_adapter(args: argparse.Namespace) -> Any:
+    """Transport selection: raw DevTools FIRST, daemon on opt-out.
+
+    Default `cdp` (ATLAS_TRANSPORT=daemon rolls back to the old stack).
+    The page-local plane (evaluate/click) rides 9222 directly; the daemon
+    stays as proven-no-op fallback and for tab metadata.
+    """
+    from atlas.browser.webbridge import DEFAULT_DAEMON_URL, WebBridgeAdapter
+
+    transport = (
+        os.environ.get("ATLAS_TRANSPORT", "") or "cdp"
+    ).strip().lower()
+    if transport in ("cdp", "cdp-first", "direct", "cdpfirst"):
+        from atlas.browser.cdp_first import CDPFirstAdapter
+
+        return CDPFirstAdapter(
+            session=args.session,
+            daemon_url=args.daemon_url or DEFAULT_DAEMON_URL,
+        )
+    return WebBridgeAdapter(
+        session=args.session,
+        daemon_url=args.daemon_url or DEFAULT_DAEMON_URL,
+    )
+
+
 def cmd_supervise(args: argparse.Namespace) -> int:
     """Run the supervisor: the LLM that handles the exception path.
 
@@ -403,10 +432,7 @@ def cmd_supervise(args: argparse.Namespace) -> int:
     from atlas.live.supervisor import LLMClient, Supervisor
     from atlas.ops.notify import Notifier
 
-    adapter = WebBridgeAdapter(
-        session=args.session,
-        daemon_url=args.daemon_url or DEFAULT_DAEMON_URL,
-    )
+    adapter = _select_adapter(args)
     capture = LiveCapture(adapter, min_markets=args.min_markets, max_wait_s=45)
     notifier = Notifier(log_path=args.notifications, console=True)
     client = LLMClient()
@@ -473,14 +499,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"(service: {telemetry._service_name()})[/cyan]"
         )
 
-    adapter = WebBridgeAdapter(
-        session=args.session,
-        daemon_url=args.daemon_url or DEFAULT_DAEMON_URL,
-    )
+    adapter = _select_adapter(args)
     capture = LiveCapture(
         adapter,
         min_markets=args.min_markets,
         max_wait_s=args.max_wait,
+    )
+    console.print(
+        f"[cyan]page transport: {type(adapter).__name__} — "
+        "reads+clicks on raw DevTools 9222, daemon as failback[/cyan]"
     )
     ledger = BetLedger(
         LedgerConfig(daily_loss_limit=args.daily_loss_limit), log_path=args.ledger
@@ -503,6 +530,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         posture = replace(posture, min_stake_ngn=args.min_stake)
     if args.max_stake is not None:
         posture = replace(posture, max_stake_per_bet=args.max_stake)
+    if args.max_bets is not None:
+        posture = replace(posture, max_bets_per_snapshot=args.max_bets)
     betslip = BetslipDriver(adapter, allow_submit=args.submit)
     # The cashout driver is only armed with --submit: a cashout moves money
     # exactly like a bet does.
@@ -537,6 +566,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         decision_log_path=args.decision_log,
         operator_min_stake=args.min_stake,
         operator_max_stake=args.max_stake,
+        operator_max_bets=args.max_bets,
         telemetry=telemetry,
     )
     runner.load_state()
@@ -852,6 +882,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="state-space",
         help="Pricing model family (default: state-space)",
     )
+    demo.add_argument(
+        "--instruction",
+        default=None,
+        help="Operator instruction that sets the posture for this snapshot "
+             "(e.g. 'low risk and more revenue')",
+    )
+    demo.add_argument(
+        "--llm",
+        action="store_true",
+        help="Use the LLM proposer for --instruction (needs ATLAS_BOSS_API_KEY)",
+    )
     demo.set_defaults(func=cmd_live_demo)
 
     b = sub.add_parser(
@@ -863,6 +904,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--log",
         default="data/decisions/boss_audit.jsonl",
         help="Decision log output path",
+    )
+    b.add_argument(
+        "--instruction",
+        default=None,
+        help="Operator instruction that sets the posture for this snapshot",
+    )
+    b.add_argument(
+        "--llm",
+        action="store_true",
+        help="Use the LLM proposer for --instruction (needs ATLAS_BOSS_API_KEY)",
     )
     b.set_defaults(func=cmd_boss)
 
@@ -1030,6 +1081,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Maximum stake per bet in NGN (default: the posture's cap)",
+    )
+    run.add_argument(
+        "--max-bets",
+        type=int,
+        default=None,
+        help="Maximum candidates staked per snapshot (default: the posture's "
+             "cap). The pre-registered campaign ran to ~30 bets in the "
+             "50th-minute burst window; HARD_BOUNDS allows 1-30.",
     )
     run.add_argument(
         "--min-stake",
