@@ -194,6 +194,7 @@ class LiveRunner:
         decision_log_path: Optional[str] = None,
         operator_min_stake: Optional[float] = None,
         operator_max_stake: Optional[float] = None,
+        operator_max_bets: Optional[int] = None,
         telemetry: Optional[Telemetry] = None,
     ) -> None:
         self.capture = capture
@@ -214,6 +215,11 @@ class LiveRunner:
         # the bounds are re-applied after EVERY posture load, not just at
         # construction.
         self.operator_min_stake = operator_min_stake
+        # Snapshot bet cap: an operator bound like stake — the saved
+        # appetite may carry a smaller collection speed than the operator
+        # ordered at launch (2026-11-02: NGN-10 burst collection),
+        # and load_state restores that appetite wholesale.
+        self.operator_max_bets = operator_max_bets
         self.operator_max_stake = operator_max_stake
         self.cycle_s = cycle_s
         self.model = model or LiveStateSpaceModel(now=datetime.now(timezone.utc))
@@ -393,6 +399,10 @@ class LiveRunner:
         if self.operator_min_stake is not None:
             posture = replace(
                 posture, min_stake_ngn=float(self.operator_min_stake)
+            )
+        if self.operator_max_bets is not None:
+            posture = replace(
+                posture, max_bets_per_snapshot=int(self.operator_max_bets)
             )
         return posture.clamped()
 

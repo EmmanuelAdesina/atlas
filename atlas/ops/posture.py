@@ -50,7 +50,10 @@ HARD_BOUNDS = {
     "min_ev": (0.01, 0.25),
     "kelly_fraction": (0.01, 0.25),
     "max_exposure_per_match": (500.0, 20_000.0),
-    "max_bets_per_snapshot": (1, 10),
+    # 2026-11-02: operator order — live burst collection at the pre-registered
+    # NGN-10 flat unit needs >10 candidates/snapshot (the 50th-minute window
+    # strings dozens of selections); the top bound tracks the venue reality.
+    "max_bets_per_snapshot": (1, 30),
     # 10.0 floor: the operator runs an NGN 10/flat regime (min == max ==
     # 10). A 100 floor here re-clamped the operator cap back to 100 every
     # cycle — the silent stake inflation of 2026-10-28.

@@ -104,11 +104,26 @@ def debug_host() -> str:
 
 
 def _http_json(url: str, method: str = "GET", timeout: float = _HTTP_TIMEOUT_S) -> dict:
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
     req = Request(url, method=method)  # noqa: S310 — local debug endpoint only
-    with urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode() or "{}")
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode() or "{}")
+    except (HTTPError, URLError, OSError, ValueError) as exc:
+        # 2026-11-02: Chrome 156 launched WITHOUT --remote-debugging-port
+        # still holds the 9222 socket but 404s every /json endpoint. That
+        # escaped here as a raw HTTPError, which is not failoverable, so
+        # CDPFirstAdapter.evaluate re-raised it and EVERY page-local read
+        # in the loop died as CaptureError -> rows "0" — the loop then
+        # reported "on the live board (0 rows)" against a board it could
+        # never actually read, and never reached the healthy daemon
+        # failback. Nothing was sent to any page, so this is exactly the
+        # definition of a failover-safe pre-error.
+        raise CDPPreError(
+            f"cdp: debug endpoint unreachable: {type(exc).__name__}: {str(exc)[:120]}"
+        ) from exc
 
 
 def _ws_create(url: str, timeout: float):
