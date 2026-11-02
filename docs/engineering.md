@@ -4,7 +4,7 @@ Source of truth for how Atlas is built right now. Read this before changing code
 
 ## Objective
 
-Proprietary, AI-driven live sports betting operation. First venue: **SportyBet Nigeria (`sportybet.com/ng`, NGN)** via a desktop browser (Kimi WebBridge). Mode: **one selected live match**, live stats + live odds as primary inputs, value evaluated mathematically, execution only when evidence and risk constraints justify it.
+Proprietary, evidence-driven real-money decision operation. Deployment venue: **a retail browser-only venue (`sportybet.com/ng`, NGN)** via a desktop browser (Kimi WebBridge). Mode: **one candidate contract set at a time**, live state + quotes as primary inputs, value evaluated mathematically, execution only when evidence and risk constraints justify it.
 
 ## Two-Plane Architecture (Fast Plane vs. Slow Plane)
 
@@ -34,11 +34,11 @@ Proprietary, AI-driven live sports betting operation. First venue: **SportyBet N
   - De-vigging (`devig_proportional`, `devig_power`, `devig_shin`),
   - Non-linear piecewise clock hazard $\Lambda(t)$ & smooth survival stoppage-time estimator (`estimate_remaining_minutes`),
   - Empirical Bayes live-stat shrinkage + Markov red-card & score-state hazard multipliers (`compute_posterior_intensities`),
-  - Coherent Bivariate Poisson / Dixon-Coles remaining-goal matrix (`build_remaining_score_matrix`) & $O(N)$ marginal surface pricing (`price_from_joint_matrix`) across 14+ SportyBet market families (`1x2`, `1x2_1h`, `1x2_2h`, `rest_of_match_1x2`, `double_chance`, `dnb`, `ou_*`, `ou_1h_*`, `ou_2h_*`, `home_ou_*`, `away_ou_*`, `btts`, `next_goal`, `handicap_*`, `ah_*`),
+  - Coherent Bivariate Poisson / Dixon-Coles remaining-goal matrix (`build_remaining_score_matrix`) & $O(N)$ marginal surface pricing (`price_from_joint_matrix`) across 14+ venue market families (`1x2`, `1x2_1h`, `1x2_2h`, `rest_of_match_1x2`, `double_chance`, `dnb`, `ou_*`, `ou_1h_*`, `ou_2h_*`, `home_ou_*`, `away_ou_*`, `btts`, `next_goal`, `handicap_*`, `ah_*`),
   - Exact push / quarter-line EV (`expected_value_detailed`) & conservative fractional Kelly (`fractional_kelly_stake`).
 - `atlas/live/estimate.py` — `Estimate` (with `[p_lower, p_upper]` uncertainty bounds) + `MarketModel` protocol, `LiveStateSpaceModel`, `NoMoreGoalsBaseline`, and expanded `check_implications` (cross-market Fréchet/logical consistency).
 - `atlas/live/loop.py` — breakeven/EV/de-vig/canonical correlation-group filter (`selection_correlation_groups`, `rank_and_filter`).
-- `atlas/live/decisions.py` — SportyBet Nigeria (`NGN`) policy gate, fractional Kelly NGN stake sizing, factor correlation guard, and JSONL decision log.
+- `atlas/live/decisions.py` — venue (`NGN`) policy gate, fractional Kelly NGN stake sizing, factor correlation guard, and JSONL decision log.
 - `atlas/live/calibration.py` — Post-settlement grading (`grade_decisions`): Brier score, log-loss, calibration gap, realized ROI by market family and confidence grade.
 - `atlas/live/boss.py` — Slow-plane Executive Portfolio Manager / CRO (`BossController`, `diagnose_live_operation`) with asymmetric risk ratchets.
 
