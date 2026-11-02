@@ -321,7 +321,7 @@ def _wait_ready(adapter: WebBridgeAdapter, max_wait_s: float = 75.0) -> None:
 # ---------------------------------------------------------------------------
 
 CDP_DEBUG_HOST = "http://127.0.0.1:9222"
-CDP_READY_BODY_MIN_CHARS = 900
+CDP_READY_BODY_MIN_CHARS = 500
 
 
 class _CDPTab:
@@ -387,7 +387,9 @@ def _http_json(url: str, method: str = "GET") -> dict:
 
 
 def _wait_ready_cdp(tab: _CDPTab, max_wait_s: float = 120.0) -> None:
-    """CDP readiness gate (probe-proven: history SPA body >= 900 chars)."""
+    """CDP readiness gate (probe-proven: history SPA body >= 500 chars,
+    the same floor the extension transport proves; 900 was an overfit to
+    one poll moment)."""
     deadline = time.time() + max_wait_s
     last: Any = None
     while time.time() < deadline:
