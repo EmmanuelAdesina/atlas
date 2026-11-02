@@ -368,7 +368,13 @@ class _CDPTab:
                         transient=True,
                     )
                 self._ws.settimeout(min(15.0, max(1.0, remaining)))
-                msg = json.loads(self._ws.recv())
+                try:
+                    msg = json.loads(self._ws.recv())
+                except self._ws_mod.WebSocketTimeoutException:
+                    # No byte inside this recv window: the peer is busy,
+                    # not gone (heavy SPA navigate). Keep draining until
+                    # the wall-clock deadline rules the wait out.
+                    continue
                 if msg.get("id") == tid:
                     if "error" in msg:
                         raise WebBridgeError(
@@ -565,7 +571,9 @@ def _scrape_cdp(out: Path, max_pages: int) -> dict:
         ) from exc
 
     try:
-        tab.call("Page.navigate", {"url": HISTORY_URL}, timeout=30)
+        # SPA navigate on the squeezed box can burn >30s (15:38 fire
+        # timed out at 30s); 90 keeps one round inside the unit budget.
+        tab.call("Page.navigate", {"url": HISTORY_URL}, timeout=90)
         _wait_ready_cdp(tab)
         data = _fetch_page_cdp(tab, 1)
         try:
