@@ -336,7 +336,9 @@ class _CDPTab:
         import websocket  # VPS venv: pip install --no-deps websocket-client
 
         self._ws_mod = websocket
-        targets = _http_json(debug_host + "/json/new", method="PUT")
+        targets = _http_json(
+            debug_host + "/json/new?" + HISTORY_URL, method="PUT"
+        )
         self.id = targets.get("id") or ""
         self._ws = websocket.create_connection(
             targets["webSocketDebuggerUrl"], timeout=90
@@ -571,9 +573,12 @@ def _scrape_cdp(out: Path, max_pages: int) -> dict:
         ) from exc
 
     try:
-        # SPA navigate on the squeezed box can burn >30s (15:38 fire
-        # timed out at 30s); 90 keeps one round inside the unit budget.
-        tab.call("Page.navigate", {"url": HISTORY_URL}, timeout=90)
+        # The tab was CREATED at HISTORY_URL (PUT /json/new?url) — no
+        # DevTools navigate roundtrip (the 2026-11-02 15:38 wedge class:
+        # target creation/navigation ops die first on squeezed chrome,
+        # while evaluate on live targets survives). The readiness gate
+        # below proves the landing; if chrome ignored the requested URL
+        # it loud-skips (transient).
         _wait_ready_cdp(tab)
         data = _fetch_page_cdp(tab, 1)
         try:
