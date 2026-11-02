@@ -344,21 +344,55 @@ class _CDPTab:
         self._mid = 0
 
     def call(self, method: str, params: Optional[dict] = None, timeout: Optional[float] = None):
+        """One CDP round-trip, deadline-protected.
+
+        The recv loop is open-ended against event storms; without a
+        wall-clock deadline a silenced socket burns the oneshot unit. Any
+        socket-layer failure (timeout, closed, parse) surfaces as
+        WebBridgeError(transient) — the unit's loud-skip path — never a
+        raw crash (the 10:23 job hard-failed on exactly this).
+        """
         self._mid += 1
         tid = self._mid
-        self._ws.send(json.dumps({"id": tid, "method": method, "params": params or {}}))
-        if timeout:
-            self._ws.settimeout(timeout)
-        while True:
-            msg = json.loads(self._ws.recv())
-            if msg.get("id") == tid:
-                self._ws.settimeout(90)
-                if "error" in msg:
+        deadline = time.monotonic() + (timeout if timeout else 90.0)
+        try:
+            self._ws.send(
+                json.dumps({"id": tid, "method": method, "params": params or {}})
+            )
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     raise WebBridgeError(
-                        f"cdp {method}: {msg['error']}", transient=True
+                        f"cdp call {method} stalled >{timeout or 90}s "
+                        "(no matching response)",
+                        transient=True,
                     )
-                return msg.get("result") or {}
-            # events are noise here
+                self._ws.settimeout(min(15.0, max(1.0, remaining)))
+                msg = json.loads(self._ws.recv())
+                if msg.get("id") == tid:
+                    if "error" in msg:
+                        raise WebBridgeError(
+                            f"cdp {method}: {msg['error']}", transient=True
+                        )
+                    return msg.get("result") or {}
+                # non-matching ids are events; keep draining to the id
+        except WebBridgeError:
+            raise
+        except self._ws_mod.WebSocketTimeoutException as exc:
+            raise WebBridgeError(
+                f"cdp call {method}: socket timeout ({str(exc)[:100]})",
+                transient=True,
+            ) from exc
+        except self._ws_mod.WebSocketException as exc:
+            raise WebBridgeError(
+                f"cdp call {method}: transport gone ({str(exc)[:100]})",
+                transient=True,
+            ) from exc
+        except (json.JSONDecodeError, OSError) as exc:
+            raise WebBridgeError(
+                f"cdp call {method}: transport/parse failure ({str(exc)[:100]})",
+                transient=True,
+            ) from exc
 
     def evaluate(self, expression: str):
         res = self.call(
@@ -406,10 +440,18 @@ def _wait_ready_cdp(tab: _CDPTab, max_wait_s: float = 120.0) -> None:
                 and v.get("rs") in ("complete", "interactive")
             ):
                 return
-        except (WebBridgeError, OSError):
-            raise
+        except WebBridgeError as exc:
+            # Mid-poll transport blips (socket timeout / closed / event
+            # storm — the 10:23 raw-WebSocketTimeoutException class) keep
+            # polling; the deadline below converts persistence into ONE
+            # loud readiness error. Never crash the pass from a blip.
+            if not exc.transient:
+                raise
+            last = f"poll blip: {str(exc)[:120]}"
+        except OSError as exc:
+            last = f"poll blip: connection-level error {str(exc)[:120]}"
         except Exception:
-            last = str(last)[:120]
+            pass
         time.sleep(3.0)
     raise WebBridgeError(
         f"cdp: bet history page never reached readiness; last {json.dumps(last)[:200]}",
@@ -516,7 +558,7 @@ def _scrape_cdp(out: Path, max_pages: int) -> dict:
     debug_host = os.environ.get("ATLAS_CDP_HOST", CDP_DEBUG_HOST)
     try:
         tab = _CDPTab(debug_host)
-    except Exception as exc:  # chrome down / port closed: skip, not page
+    except Exception as exc:  # chrome down / port closed: skip, not crash
         raise WebBridgeError(
             f"cdp: no debug target on {debug_host}: {str(exc)[:160]}",
             transient=True,
@@ -526,7 +568,15 @@ def _scrape_cdp(out: Path, max_pages: int) -> dict:
         tab.call("Page.navigate", {"url": HISTORY_URL}, timeout=30)
         _wait_ready_cdp(tab)
         data = _fetch_page_cdp(tab, 1)
-        total_num = int(data.get("totalNum") or len(data.get("entityList") or []))
+        try:
+            total_num = int(data.get("totalNum") or len(data.get("entityList") or []))
+        except (TypeError, ValueError) as exc:
+            raise WebBridgeError(
+                f"cdp bet history: malformed totalNum "
+                f"{data.get('totalNum')!r} (entityList len "
+                f"{len(data.get('entityList') or [])})",
+                transient=True,
+            ) from exc
         pages_needed = max(1, (total_num + PAGE_SIZE - 1) // PAGE_SIZE)
         if max_pages > 0:
             pages_needed = min(pages_needed, max_pages)
@@ -619,7 +669,13 @@ def _scrape_extension(
     try:
         # Page 1 fixes the total; later pages follow it.
         data = _fetch_page(adapter, 1)
-        total_num = int(data.get("totalNum") or len(data.get("entityList") or []))
+        try:
+            total_num = int(data.get("totalNum") or len(data.get("entityList") or []))
+        except (TypeError, ValueError) as exc:
+            raise WebBridgeError(
+                f"bet history page 1: malformed totalNum {data.get('totalNum')!r}",
+                transient=True,
+            ) from exc
         pages_needed = max(1, (total_num + PAGE_SIZE - 1) // PAGE_SIZE)
         if cap > 0:
             pages_needed = min(pages_needed, cap)
