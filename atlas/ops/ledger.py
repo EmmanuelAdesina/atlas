@@ -125,7 +125,9 @@ class BetLedger:
                     bet.settled_at = entry.get("timestamp") or bet.settled_at
                     bet.settle_ngn = float(rec["settle_ngn"]) if rec.get("settle_ngn") is not None else None
                     bet.book_status = rec.get("book_status")
-                    bet.settle_source = rec.get("source", "external")
+                    # the record's own field is settle_source (asdict key);
+                    # fall back to the historical 'source' key then 'external'
+                    bet.settle_source = rec.get("settle_source") or rec.get("source") or "external"
                     self._bets[bet.bet_id] = bet
                     continue
                 bet = BetRecord.from_dict(rec)
@@ -362,6 +364,56 @@ class BetLedger:
                     b.pnl_ngn = round(float(payout_ngn) - b.stake_ngn, 2)
                     self._append(b, "bet_settled")
         return self._bets[bet_id].to_dict()
+
+    def record_book_settle(
+        self,
+        bet_id: str,
+        status: str,
+        payout_ngn: float,
+        book_status: str,
+        source: str = "sportybet_bet_history",
+    ) -> dict:
+        """Settle one bet from the book's own truth (Bet History reconcile).
+
+        Mirrors settle()'s payout path exactly — pnl = payout − stake,
+        never a locally recomputed formula — and additionally persists the
+        book's evidence: `settle_ngn` (what the book paid/returned),
+        `book_status` (e.g. 'order:30:261101231827ord47418247') and
+        `settle_source`. The caller must only pass statuses the BOOK
+        reported ('won'/'lost'/'void'); unknown bets stay open and are
+        reported, never guessed. Idempotent: an already-settled bet is
+        left untouched and returned as-is.
+        """
+        if status not in SETTLED_STATUSES:
+            raise ValueError(f"Invalid settle status: {status!r}. Must be one of {SETTLED_STATUSES}")
+        with self._lock:
+            bet = self._bets.get(bet_id)
+            if bet is None:
+                raise KeyError(f"Unknown bet_id: {bet_id}")
+            if bet.status in SETTLED_STATUSES:
+                return bet.to_dict()
+            payout = round(float(payout_ngn), 2)
+            bet.status = status
+            bet.settled_at = datetime.now(timezone.utc).isoformat()
+            bet.settle_ngn = payout
+            bet.book_status = book_status
+            bet.settle_source = source
+            bet.pnl_ngn = round(payout - bet.stake_ngn, 2)
+            self._append(bet, "bet_settled")
+            return bet.to_dict()
+
+    def book_unsettle(self, bet_id: str) -> None:
+        """Operator guard-rail: reopen a bet that was settled by a WRONG
+        reconcile (e.g. a bad match). Records the reopen; PnL is zeroed and
+        the book fields are kept for the audit trail."""
+        with self._lock:
+            bet = self._bets.get(bet_id)
+            if bet is None:
+                raise KeyError(f"Unknown bet_id: {bet_id}")
+            bet.status = "placed"
+            bet.pnl_ngn = 0.0
+            bet.settled_at = None
+            self._append(bet, "bet_unsettle_by_operator")
 
     @property
     def daily_pnl_ngn(self) -> float:
