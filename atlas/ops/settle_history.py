@@ -46,6 +46,8 @@ ROOT = Path(__file__).resolve().parents[2]
 LEDGER = ROOT / "data" / "ops" / "ledger.jsonl"
 SETTLE_STATE = ROOT / "data" / "ops" / "settle_state.json"
 
+STALE_STATE_MIN = 90  # one missed hourly pass = the record is no longer current
+
 # Fixed, pre-registered tolerances. Placement is claimed client-side a few
 # seconds before the book creates the ticket; 150s covers clock skew
 # between the ledger clock and the ticket clock without spanning two
@@ -228,6 +230,23 @@ def reconcile(
     src = state.get("source") or {}
     tickets = state.get("tickets") or []
 
+    # How old is the truth being worked from? A scrape that skipped (the
+    # 09:00 fire hit a mid-restart browser and still exited 0) leaves the
+    # previous snapshot in place; the unit must SAY the record is stale,
+    # not pass silently. >90 min = one missed hourly pass.
+    state_age_min: int | None = None
+    try:
+        fetched = datetime.fromisoformat(
+            str(state.get("fetched_at")).replace("Z", "+00:00")
+        )
+        state_age_min = int(
+            (datetime.now(timezone.utc) - fetched).total_seconds() // 60
+        )
+    except (ValueError, TypeError, AttributeError):
+        state_age_min = None
+    state_stale = state_age_min is None or state_age_min > STALE_STATE_MIN
+
+
     ledger = BetLedger(LedgerConfig(), log_path=str(ledger_path))
     all_bets = ledger.all_bets()
     open_bets = [b for b in all_bets if b.get("status") not in SETTLED_STATUSES]
@@ -247,6 +266,8 @@ def reconcile(
     report: dict[str, Any] = {
         "state_fetched_at": state.get("fetched_at"),
         "state_source": src,
+        "state_age_min": state_age_min,
+        "state_stale": state_stale,
         "open_bets": len(open_bets),
         "legacy_settled_reviewed": len(retro_bets),
         "tickets_in_state": len(tickets),
@@ -392,6 +413,13 @@ def _print_report(report: dict, cap: int = 15) -> None:
         f"  state fetched: {report.get('state_fetched_at')} "
         f"(api {src.get('api')}, session {src.get('session')})"
     )
+    if report.get("state_stale"):
+        print(
+            f"  !! STALE SETTLE STATE - age {report.get('state_age_min')} min "
+            f"(limit {STALE_STATE_MIN}): the last scrape skipped, the ledger "
+            f"is being reasoned against OLD book truth. Fix the browser, "
+            f"re-run the scrape before trusting settlements."
+        )
     print(f"  open bets entering: {report['open_bets']}")
     print(
         f"  legacy settled reviewed: {report.get('legacy_settled_reviewed', 0)} "

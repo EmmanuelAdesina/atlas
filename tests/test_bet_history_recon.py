@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from atlas.live.bet_history_scrape import parse_ticket
+from atlas.ops.settle_history import STALE_STATE_MIN
 from atlas.ops.ledger import BetLedger, BetRecord, LedgerConfig
 from atlas.ops.settle_history import (
     book_payout_ngn,
@@ -419,6 +420,41 @@ def test_record_book_settle_is_idempotent_at_the_ledger(tmp_path: Path) -> None:
     with open(log, encoding="utf-8") as f:
         events = [json.loads(line)["event"] for line in f if line.strip()]
     assert events.count("bet_settled") == 1
+
+
+# --------------------------------------------------------------------------
+# stale-truth loudness: a skipped scrape leaves the PREVIOUS snapshot and
+# reconcile must say so (the 2026-11-02 09:00 fire silently reconced old
+# truth after the browser restart) — the record states its own age.
+
+def test_state_age_and_stale_flag_in_report(tmp_path: Path) -> None:
+    ledger = BetLedger(LedgerConfig(), log_path=str(tmp_path / "ledger.jsonl"))
+    # state written 3h ago (two missed hourly passes), ticket matching nothing
+    write_state(
+        tmp_path,
+        [raw_ticket("261028120000oldT1", _ms(datetime(2026, 10, 28, 12, 0, 2, tzinfo=timezone.utc)), 10.0, 2.4, 24.0, 20)],
+        fetched="2026-11-02T04:00:00+00:00",
+    )
+    report = run_reconcile(ledger, tmp_path / "ledger.jsonl", tmp_path / "settle_state.json")
+    assert report["state_stale"] is True
+    assert report["state_age_min"] >= 170
+
+    # fresh state -> not stale
+    write_state(
+        tmp_path,
+        [raw_ticket("261028120002nwT2", _ms(datetime(2026, 10, 28, 12, 0, 2, tzinfo=timezone.utc)), 10.0, 2.4, 24.0, 20)],
+        fetched=datetime.now(timezone.utc).isoformat(),
+    )
+    report2 = run_reconcile(ledger, tmp_path / "ledger.jsonl", tmp_path / "settle_state.json")
+    assert report2["state_stale"] is False
+    assert report2["state_age_min"] <= STALE_STATE_MIN
+
+
+def test_missing_state_stays_fail_closed(tmp_path: Path) -> None:
+    ledger = BetLedger(LedgerConfig(), log_path=str(tmp_path / "ledger.jsonl"))
+    report = run_reconcile(ledger, tmp_path / "ledger.jsonl", tmp_path / "settle_state.json")
+    assert report["scrape_state_missing"] is True
+    assert report["changed"] == 0
 
 
 # --------------------------------------------------------------------------

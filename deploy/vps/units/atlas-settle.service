@@ -5,6 +5,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/atlas
+# DETERMINISTIC transport: the extension-first auto chain costs minutes of
+# retry when the daemon wedges (2026-11-02 09:00 fire skipped after 4+ min).
+# CDP is probe-proven (264 tickets) and independent of the daemon.
+Environment=ATLAS_BET_HISTORY_TRANSPORT=cdp
 ExecStart=/opt/atlas/.venv/bin/python -m atlas.ops.settle_history --scrape
 Nice=5
 TimeoutStartSec=900
