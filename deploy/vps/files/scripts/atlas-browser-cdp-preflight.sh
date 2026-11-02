@@ -14,7 +14,10 @@ set -u
 HB=/opt/atlas/data/ops/heartbeat.json
 
 cdp_ok() {
-  [ "$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:9222/json/version)" = "200" ]
+  # The probe is the DEEP one: HTTP /json/version can answer 200 while the
+  # tab-level channel starves (15:22 wedge: HTTP green, every evaluate
+  # timed out for 120s) — the scrape lives on the WS layer, so probe THAT.
+  /usr/local/sbin/atlas-cdp-deep-probe.py >/dev/null 2>&1
 }
 
 # placement active -> never recycle; skip loudly instead
@@ -24,6 +27,10 @@ if [ "${Q:-0}" != "0" ] || [ "${I:-0}" != "0" ]; then
   logger -t atlas-cdp-preflight "placement active (queue=$Q inflight=$I) — refusing preflight recycle"
   exit 42
 fi
+
+# The probe is the DEEP one: HTTP /json/version can answer 200 while the
+# tab-level channel starves (15:22 wedge: HTTP green, every evaluate
+# timed out for 120s) — the scrape lives on the WS layer, so probe THAT.
 
 if cdp_ok; then
   exit 0

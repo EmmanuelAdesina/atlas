@@ -17,6 +17,17 @@ alert() {
     "host: $(hostname) | at: $(date -u +%FT%TZ) | action: $2" 2>/dev/null
 }
 
+# MONEY SAFETY (top of every restart path): with a placement queued or
+# inflight, restarting chrome pulls the rug from under a live bet. Defer;
+# the next watchdog pass or the settle preflight heals when it lands.
+HB=/opt/atlas/data/ops/heartbeat.json
+Q=$(python3 -c "import json;h=json.load(open(\"$HB\"));print(h.get(\"place_queue_depth\",0))" 2>/dev/null)
+I=$(python3 -c "import json;h=json.load(open(\"$HB\"));print(len(h.get(\"place_inflight\") or []))" 2>/dev/null)
+if [ "${Q:-0}" != "0" ] || [ "${I:-0}" != "0" ]; then
+  logger -t atlas-watchdog "placement active (queue=$Q inflight=$I) — browser restart deferred"
+  exit 0
+fi
+
 # 1. Chrome alive?
 if ! pgrep -f "user-data-dir=/opt/atlas/chrome-profile" >/dev/null; then
   alert "chrome not running" "restarting atlas-browser.service"
@@ -31,8 +42,9 @@ fi
 # the hourly reconcile (2026-11-02: three wedges inside 90 min while the
 # box sat at ~80 MB free). Probe 9222 directly; twice in a row ->
 # restart the browser plane, same cure as the extension wedge.
-CDP=$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:9222/json/version)
-if [ "$CDP" != "200" ]; then
+CDP=0
+/usr/local/sbin/atlas-cdp-deep-probe.py >/dev/null 2>&1 || CDP=$?
+if [ "$CDP" != "0" ]; then
   if [ "$PREV" = "cdpGone" ]; then
     alert "chrome devtools wedged twice" "restarting atlas-browser.service"
     systemctl restart atlas-browser
