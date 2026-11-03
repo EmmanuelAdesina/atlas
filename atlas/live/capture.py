@@ -938,6 +938,8 @@ class LiveCapture:
 
     def capture(self, wait: bool = True) -> CaptureResult:
         """Read the focused match panel, waiting until it is ready."""
+        from atlas.live.extract import markets_from_js_entries
+
         deadline = time.monotonic() + (self.max_wait_s if wait else 0.0)
         reason = "not captured"
         media_hidden = False
@@ -1014,7 +1016,6 @@ class LiveCapture:
                     b_home, b_away = bundle_teams.split(" vs ", 1)
                 else:
                     b_home, b_away = self._team_names()
-                from atlas.live.extract import markets_from_js_entries
 
                 markets = markets_from_js_entries(
                     entries, self.match_id, b_home.strip(), b_away.strip()
@@ -1030,27 +1031,23 @@ class LiveCapture:
                 # loop opened dozens of live matches). Force the market
                 # tab back and re-read once before giving the panel up.
                 empty_reads += 1
-                if empty_reads >= 2:
-                    if self.open_markets_tab():
-                        time.sleep(self.poll_s)
-                        bundle = self.read_capture_bundle()
-                        entries = bundle.get("markets") if bundle else None
-                        if isinstance(entries, list) and entries:
-                            from atlas.live.extract import markets_from_js_entries
+                if empty_reads >= 2 and self.open_markets_tab():
+                    time.sleep(self.poll_s)
+                    bundle = self.read_capture_bundle()
+                    entries = bundle.get("markets") if bundle else None
+                    if isinstance(entries, list) and entries:
+                        from atlas.live.extract import markets_from_js_entries
 
-                            b_teams = bundle.get("teams") if bundle else None
-                            if isinstance(b_teams, str) and " vs " in b_teams:
-                                b_home, b_away = b_teams.split(" vs ", 1)
-                            else:
-                                b_home, b_away = self._team_names()
-                            markets = markets_from_js_entries(
-                                entries,
-                                self.match_id,
-                                b_home.strip(),
-                                b_away.strip(),
-                            )
-            if not markets:
-                texts: list[str] = []
+                        b_teams = bundle.get("teams") if bundle else None
+                        if isinstance(b_teams, str) and " vs " in b_teams:
+                            b_home, b_away = b_teams.split(" vs ", 1)
+                        else:
+                            b_home, b_away = self._team_names()
+                        markets = markets_from_js_entries(
+                            entries, self.match_id,
+                            b_home.strip(), b_away.strip(),
+                        )
+            texts: list[str] = []
             if not markets:
                 try:
                     texts = self._snapshot_texts()
