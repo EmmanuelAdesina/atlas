@@ -203,3 +203,41 @@ remembered when reading the account balance.
 ever drops without a matching `bet_placed` in `data/ops/ledger.jsonl`, that is
 the "unconfirmed placement" condition — stop the loop, check Bet History, and
 reconcile before resuming.
+
+**2026-11-03 — the box's own CD had been silently undoing every deploy.**
+`atlas-cd.timer` fires every 15 min: pull -> apply -> smoke (300 s window) ->
+on any failure, FULL rollback of `/opt/atlas` AND `/etc`+`/usr` config to
+`.cd-lastgood` — a file that only CD's own deploys ever update, never
+operator-landed waves. Journal (2026-11-03): `d1445de` was deployed at
+08:15 / 08:30 / 08:45 and rolled back to `8c49b50a` all three times; config
+restored from `.cd-backup`, atlas-loop restarted on the OLD tree. The kimi
+policy json, the old browser unit (no `--disable-extensions`) and the OLD
+daemon-dependent transport kept resurrecting after every "successful" manual
+deploy, with zero log noise. Money walls were never absent (the rollback was
+legal under the CD's money-floor guard — `8c49b50a` carries UNIT_STAKE_NGN +
+"proven"), but the box ran weeks behind on every fix. 09:00Z: `atlas-cd.timer`
+DISABLED (`systemctl disable --now atlas-cd.timer`) — deploy doctrine was
+already manual waves. Post-deploy verification = operator runs
+`/usr/local/sbin/atlas-deploy-smoke.sh` manually and reads its output; CD
+restores only if re-enabled. `.cd-lastgood` deliberately left at `8c49b50a`.
+If CD is ever re-armed, advance `.cd-lastgood` deliberately or it rolls the
+box back to `8c49b50a` again. Also fixed (same day): the "SMOKE FAILED
+(exit 0)" log line bug — `$?` after `if ! timeout …` reads the negation, not
+the smoke's real exit code; RC is now captured explicitly.
+
+**2026-11-03 — chrome wedge root-cause for the money plane.**
+Even on a CLEAN boot (fresh unit, `--disable-extensions`, kimi dead, zero
+tabs) the DevTools HTTP plane blackholes: `LISTEN 127.0.0.1:9222` but every
+request stalls at 10 s (000). System telemetry at the time: 13.6/12 kswapd,
+swap used 1.6 GB of 5 GB, available RAM ~262 MB; next-server (~72 MB) + three
+celery workers (~230 MB, the production RELIASTRA app) reserve RAM on the
+same box as chrome + Xvfb. Additional lever taken: `--force-renderer-accessibility`
+REMOVED — the JS agent never reads the a11y tree; the flag materialized the
+entire accessibility tree per live-page DOM (tens of thousands of nodes),
+the single largest discretionary chrome RAM cost. If capture still cannot
+complete after this, the conclusion is structural: a 1.6 GB box carrying a
+JS-heavy SportyBet SPA plus prod next-server+celery cannot service DevTools
+reliably. Required: RAM upgrade (≥ 3–4 GB) or hosting chrome on separate
+compute. Until then the campaign correctly stays fail-closed: zero
+placements, honest errors, ledger untouched — money never moves on an
+unreadable plane.

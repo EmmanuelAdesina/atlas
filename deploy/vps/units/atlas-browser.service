@@ -12,11 +12,15 @@ Environment=DISPLAY=:0
 # No kimi daemon anymore (2026-11-02): the CDP-first transport replaced it,
 # and its extension was the flaky layer + renderer memory. Chrome starts
 # CLEAN, extensions forced off (the old install policy is removed by apply).
+# --force-renderer-accessibility REMOVED 2026-11-03: the JS agent never reads
+# the a11y tree; forcing it materializes the FULL accessibility tree per
+# SportyBet live SPA page (thousands of nodes, worst-case RAM on a box
+# already swapping). Chrome wedges on it; the flag cost the campaign the lot.
 ExecStartPre=/usr/local/sbin/atlas-chrome-session-clean.sh
 ExecStart=/usr/bin/google-chrome \
   --user-data-dir=/opt/atlas/chrome-profile \
   --no-first-run --no-default-browser-check \
-  --start-maximized --force-renderer-accessibility \
+  --start-maximized \
   --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
   --disable-gpu --disable-dev-shm-usage \
   --disk-cache-size=33554432 \

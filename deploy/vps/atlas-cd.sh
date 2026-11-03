@@ -117,8 +117,11 @@ if ! /usr/local/sbin/atlas-apply.sh; then
   exit 1
 fi
 
-if ! timeout "${ATLAS_CD_SMOKE_S:-330}" /usr/local/sbin/atlas-deploy-smoke.sh; then
-  RC=$?
+# Note: never fold the smoke invocation inside `if ! ...` — $? then reads the
+# !-negation (always 0) and the journal prints "SMOKE FAILED (exit 0)",
+# hiding the real exit. Capture RC explicitly.
+timeout "${ATLAS_CD_SMOKE_S:-330}" /usr/local/sbin/atlas-deploy-smoke.sh; RC=$?
+if [ "$RC" -ne 0 ]; then
   log "SMOKE FAILED (exit $RC)"
   if [ -n "$LASTGOOD" ] && money_walls_present "$LASTGOOD"; then
     if g reset --hard "$LASTGOOD" >/dev/null 2>&1; then
