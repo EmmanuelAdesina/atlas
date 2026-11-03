@@ -161,3 +161,45 @@ real slow plane with a clear division of labour.
 - **R6 = Block bets when model-market gap > 5pp**. Prevents fake edges from calibration.
 - **R1 = Score IS in main DOM**. CSS classes identified from DevTools. Extractor updated.
 
+
+## 2026-11-02 — transport wedge + account drift (operator note)
+
+**CDP plane dead-but-listening (root cause of the 0-rows wedge).**
+Chrome 156 (this box) was running **without** `--remote-debugging-port=9222`.
+Something still bound the 9222 socket and answered every `/json/*` endpoint
+with 404-empty, so `cdp_direct._http_json` leaked a raw `HTTPError` — which is
+NOT a failoverable `CDPPreError`. `CDPFirstAdapter.evaluate` therefore re-raised
+it, every page-local read in the loop died as swallowed `CaptureError`, and
+`board_row_count()` returned **0**. The board read "on the live board (0 rows)"
+against a board that was being driven fine through the daemon (~56 `.match-row`s
+at last probe). A "0 rows" panel is therefore NOT evidence of an empty board —
+it can mean every read raised.
+
+*Fix:* `_http_json` now wraps HTTP/socket errors in `CDPPreError` (nothing was
+sent to any page → daemon failback is safe). After the fix the loop read 55 real
+rows and opened a match page through the daemon within its first cycles.
+*Remaining:* Chrome has to be (re)launched **with** `--remote-debugging-port=9222`
+(and an explicit `--user-data-dir`, because Chrome 136+ disables remote debugging
+for the default profile) to restore the raw-CDP millisecond plane. Launcher:
+`data/ops/start_chrome_cdp.ps1`. Do NOT launch Chrome while an instance is
+running — single-instance merge silently drops the flags.
+
+**Operator manual stakes excluded from campaign math.**
+SportyBet account 8036656131 prepared/placed manual stakes outside the ledger:
+the 2026-11-02 unsettled 6-leg Multiple, stake NGN 200.00, placed ~10:43 site
+time, confirmed by the operator as manual — LEFT unsettled list at ~11:14 site
+time (settled/voided, no Ledger provenance); a SECOND 9-leg Multiple, stake
+NGN 200.00, was placed ~11:14 site time and is Running at 19:41 UTC
+(Atalanta v Parma, Villarreal v PSG, SonderjyskE v Copenhagen + 6 others).
+Balance watermark: NGN 467.38 (~16:42 UTC) -> NGN 267.38 (17:11 UTC) ->
+NGN 111.96 (19:41 UTC), consistent with the two NGN 200 manual accas plus a
+small return. These are operator actions, NOT
+Atlas placements (Atlas stakes are mechanically clamped to NGN 10 singles and
+logged zero placements that day). They must stay excluded from the campaign
+cohort (same rule as the 2026-11-01 unclaimed 25 tickets) and SHOULD be
+remembered when reading the account balance.
+
+**Ledger is the only money record the campaign trusts.** If the account balance
+ever drops without a matching `bet_placed` in `data/ops/ledger.jsonl`, that is
+the "unconfirmed placement" condition — stop the loop, check Bet History, and
+reconcile before resuming.

@@ -1021,7 +1021,36 @@ class LiveCapture:
                 )
             if not markets:
                 markets = self.read_markets_dom()
-            texts: list[str] = []
+            if not markets:
+                # 2026-11-02: a ready match panel can still carry ZERO
+                # markets when a non-odds view (Statistics / Match Tracker)
+                # replaced the odds panel — the market read is then
+                # legitimately empty and every such cycle priced nothing
+                # SILENTLY (two hours of zero decision records while the
+                # loop opened dozens of live matches). Force the market
+                # tab back and re-read once before giving the panel up.
+                empty_reads += 1
+                if empty_reads >= 2:
+                    if self.open_markets_tab():
+                        time.sleep(self.poll_s)
+                        bundle = self.read_capture_bundle()
+                        entries = bundle.get("markets") if bundle else None
+                        if isinstance(entries, list) and entries:
+                            from atlas.live.extract import markets_from_js_entries
+
+                            b_teams = bundle.get("teams") if bundle else None
+                            if isinstance(b_teams, str) and " vs " in b_teams:
+                                b_home, b_away = b_teams.split(" vs ", 1)
+                            else:
+                                b_home, b_away = self._team_names()
+                            markets = markets_from_js_entries(
+                                entries,
+                                self.match_id,
+                                b_home.strip(),
+                                b_away.strip(),
+                            )
+            if not markets:
+                texts: list[str] = []
             if not markets:
                 try:
                     texts = self._snapshot_texts()

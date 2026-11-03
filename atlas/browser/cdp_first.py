@@ -34,7 +34,7 @@ Money discipline (unchanged walls, new socket):
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from atlas.browser import cdp_direct
 from atlas.browser.webbridge import DEFAULT_DAEMON_URL, WebBridgeAdapter, WebBridgeError
@@ -136,3 +136,64 @@ class CDPFirstAdapter(WebBridgeAdapter):
             if self._failoverable(exc):
                 return super().click(selector)
             raise
+
+    def navigate(self, url: str, new_tab: bool = False,
+                 group_title: Optional[str] = None) -> Any:
+        """Navigate over CDP: Page.navigate on the reserved target, or a
+        URL-carrying target creation when none matches (probe-proven to
+        land).
+
+        Page.navigate answers fast by design; ARRIVAL is proven by the
+        caller's readiness checks (capture.load_board verifies
+        location.href) — the daemon navigate this replaces timed out on
+        the same waits anyway. group_title is a daemon-only concept and
+        is accepted for call-compatibility, stored nowhere.
+        """
+        if new_tab or group_title:
+            try:
+                page = cdp_direct.open_page(url)
+                ws = cdp_direct.connect(page)
+                try:
+                    return cdp_direct.call(
+                        ws, "Page.navigate", {"url": url}, timeout=20.0)
+                finally:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
+            except WebBridgeError as exc:
+                if self._failoverable(exc):
+                    return super().navigate(
+                        url, new_tab=new_tab, group_title=group_title)
+                raise
+        try:
+            page, _created = cdp_direct.ensure_page(
+                self.cdp_url_prefixes, create_url=url,
+                host_hint=self.cdp_host_hint)
+            ws = cdp_direct.connect(page)
+            try:
+                return cdp_direct.call(
+                    ws, "Page.navigate", {"url": url}, timeout=20.0)
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        except WebBridgeError as exc:
+            if self._failoverable(exc):
+                return super().navigate(url)
+            raise
+
+    def cdp(self, method: str, params: Optional[dict[str, Any]] = None) -> Any:
+        """Served locally for the one method the recovery paths need.
+        Everything else fails FAST (transient-unknown, nothing mailed to
+        any page) instead of daemon-502-stalling the caller."""
+        if method == "Page.navigate":
+            url = (params or {}).get("url")
+            if url:
+                return self.navigate(url)
+        raise WebBridgeError(
+            f"cdp-first transport does not serve {method!r} — "
+            "nothing was executed",
+            transient=True,
+        )

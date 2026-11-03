@@ -1,7 +1,7 @@
 [Unit]
 Description=ATLAS Chrome (SportyBet plane) - the designated OOM victim
-After=network-online.target atlas-xvfb.service kimi-webbridge.service
-Wants=network-online.target atlas-xvfb.service kimi-webbridge.service
+After=network-online.target atlas-xvfb.service
+Wants=network-online.target atlas-xvfb.service
 
 [Service]
 Type=simple
@@ -9,10 +9,9 @@ User=reliastra
 Group=reliastra
 Environment=HOME=/home/reliastra
 Environment=DISPLAY=:0
-# RAM discipline: this cgroup eats the squeeze FIRST so prod never OOMs.
-# Kill here is cheap: watchdog restarts Chrome, profile persists.
-# Crash-restore loop breaker (wedge-kill -> exit_type Crashed -> next boot
-# replays the drowned tab stack; 2026-11-02 17:0x): reset BEFORE boot.
+# No kimi daemon anymore (2026-11-02): the CDP-first transport replaced it,
+# and its extension was the flaky layer + renderer memory. Chrome starts
+# CLEAN, extensions forced off (the old install policy is removed by apply).
 ExecStartPre=/usr/local/sbin/atlas-chrome-session-clean.sh
 ExecStart=/usr/bin/google-chrome \
   --user-data-dir=/opt/atlas/chrome-profile \
@@ -22,6 +21,7 @@ ExecStart=/usr/bin/google-chrome \
   --disable-gpu --disable-dev-shm-usage \
   --disk-cache-size=33554432 \
   --js-flags=--max-old-space-size=384 \
+  --disable-extensions \
   --remote-debugging-port=9222 \
   --window-position=0,0 --window-size=1920,1080 \
   about:blank

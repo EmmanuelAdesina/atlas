@@ -71,7 +71,6 @@ add_file "deploy/vps/files/scripts/atlas-cdp-deep-probe.py"        "/usr/local/s
 add_file "deploy/vps/files/scripts/atlas-chrome-session-clean.sh"  "/usr/local/sbin/atlas-chrome-session-clean.sh" root 755
 add_file "deploy/vps/files/99-atlas-memory.conf"                "/etc/sysctl.d/99-atlas-memory.conf" root 644
 add_file "deploy/vps/files/logrotate-atlas"                     "/etc/logrotate.d/atlas" root 644
-add_file "deploy/vps/files/chrome-policy.json"                  "/etc/opt/chrome/policies/managed/kimi-webbridge.json" root 644
 add_file "deploy/vps/atlas_alert.py"                            "$REPO/scripts/atlas_alert.py" root 755
 add_file "deploy/vps/atlas-apply.sh"                             "/usr/local/sbin/atlas-apply.sh" root 755
 add_file "deploy/vps/atlas-cd.sh"                                "/usr/local/sbin/atlas-cd.sh" root 755
@@ -118,6 +117,12 @@ if $CHECK; then
   [ "$DRIFT" = "0" ] && echo "check: clean — installed config matches repo"
   exit $DRIFT
 fi
+
+# kimi webbridge decommissioned (2026-11-02 19:35): the daemon/extension
+# pair was the sick evaluate plane and a RAM/space eat. The CDP-first
+# transport replaces it. The force-install chrome policy is retired so a
+# chrome restart can neither reinstall nor re-arm the extension.
+rm -f /etc/opt/chrome/policies/managed/kimi-webbridge.json
 
 if [ "$need_sysctl_reload" = "true" ]; then
   sysctl --system >/dev/null 2>&1 || true

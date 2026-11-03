@@ -6,6 +6,7 @@ post-execution unknowns.
 """
 
 import httpx
+import json
 import pytest
 
 from atlas.browser import cdp_direct
@@ -184,6 +185,60 @@ def test_evaluate_safe_rotates_reads_but_evaluate_does_not(monkeypatch):
     assert seen["extras"] == ["T9"]  # the second page target was offered
     assert a.evaluate("betslip JS")["value"] == "primary-only"  # no rotation
     assert calls == [] or isinstance(calls, list)
+
+
+class FakeNav:
+    """Minimal ws double for one-deadline-call navigate tests."""
+
+    def __init__(self):
+        self.calls = []
+
+    def send(self, frame):
+        self.calls.append(json.loads(frame))
+
+    def recv(self):
+        raise RuntimeError("starved")
+
+    def settimeout(self, t):
+        pass
+
+    def close(self):
+        pass
+
+
+def test_navigate_rides_page_navigate_on_the_reserved_target(monkeypatch):
+    a = _daemon(lambda req: httpx.Response(500, text="daemon unreachable"))
+    fake = FakeNav()
+    monkeypatch.setattr(cdp_direct, "ensure_page", lambda *a2, **k: (PAGE, False))
+    monkeypatch.setattr(cdp_direct, "connect", lambda target: fake)
+    monkeypatch.setattr(
+        cdp_direct, "call",
+        lambda ws, method, params=None, timeout=0: (
+            fake.calls.append({"method": method, "params": params}) or {"frameId": "F"}),
+    )
+    out = a.navigate("https://www.sportybet.com/ng/sport/football/live_list/")
+    assert out["frameId"] == "F"
+    assert fake.calls[0]["method"] == "Page.navigate"
+
+
+def test_navigate_new_tab_creates_the_target(monkeypatch):
+    a = _daemon(lambda req: httpx.Response(500))
+    opened = {}
+    monkeypatch.setattr(
+        cdp_direct, "open_page", lambda url: opened.setdefault("url", url))
+    fake = FakeNav()
+    monkeypatch.setattr(cdp_direct, "connect", lambda target: fake)
+    monkeypatch.setattr(
+        cdp_direct, "call", lambda ws, method, params=None, timeout=0: {"frameId": "F"})
+    a.navigate("https://www.sportybet.com/ng/", new_tab=True)
+    assert "ng/" in opened["url"]
+
+
+def test_cdp_passthrough_serves_only_page_navigate_locally():
+    a = _daemon(lambda req: httpx.Response(500))
+    with pytest.raises(WebBridgeError) as ei:
+        a.cdp("Runtime.evaluate", {"expression": "1"})
+    assert ei.value.transient is True
 
 
 def test_deterministic_page_error_is_raised_not_failover(monkeypatch):
