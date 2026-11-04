@@ -53,7 +53,9 @@ HARD_BOUNDS = {
     # 2026-11-02: operator order — live burst collection at the pre-registered
     # NGN-10 flat unit needs >10 candidates/snapshot (the 50th-minute window
     # strings dozens of selections); the top bound tracks the venue reality.
-    "max_bets_per_snapshot": (1, 30),
+    # 2026-11-04: operator-approved velocity profile raises the ceiling to 40
+    # (40 bets/snapshot burst on a single live match; stake bounds unchanged).
+    "max_bets_per_snapshot": (1, 40),
     # 10.0 floor: the operator runs an NGN 10/flat regime (min == max ==
     # 10). A 100 floor here re-clamped the operator cap back to 100 every
     # cycle — the silent stake inflation of 2026-10-28.
