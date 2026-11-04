@@ -846,6 +846,65 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_agent(args: argparse.Namespace) -> int:
+    """Run the AI-first agent plane (opencode brain over the live tab).
+
+    The orchestrator is a process supervisor only: it feeds the brain its
+    auditable facts each cycle and keeps it cycling. Pricing, market
+    exploration, and placement happen inside the opencode session, through
+    the tab tool and the WebBridge daemon.
+
+    Money interaction is gated separately: ATLAS_AGENT_MONEY=1 in the
+    environment arms click/fill/upload in the tab tool. Without it the
+    agent runs observe-only, whatever else is armed.
+    """
+    from atlas.agent.action_log import AgentActionLog
+    from atlas.agent.brain import OpencodeBrain
+    from atlas.agent.orchestrator import AgentOrchestrator
+
+    from atlas.ops.ledger import BetLedger, LedgerConfig
+
+    sessions = [s.strip() for s in args.sessions.split(",") if s.strip()]
+    brains = [
+        OpencodeBrain.from_env(
+            session=name,
+            model=args.model,
+            agent_name=args.agent_name,
+            attach_url=args.attach,
+        )
+        for name in sessions
+    ]
+    ledger = BetLedger(LedgerConfig(daily_loss_limit=args.daily_loss_limit), log_path=args.ledger)
+    action_log = AgentActionLog(args.action_log)
+    for b in brains:
+        b.workdir = os.getcwd()
+
+    money = os.environ.get("ATLAS_AGENT_MONEY", "") == "1"
+    console.print(
+        f"[bold]Atlas agent loop[/bold] | sessions {sessions} | "
+        f"ledger {args.ledger} | money gate "
+        f"[{'OPEN' if money else 'CLOSED (observe only)'}]"
+    )
+    if args.attach:
+        console.print(f"[cyan]opencode server: {args.attach}[/cyan]")
+    else:
+        console.print("[cyan]brains run as local `opencode run` subprocesses[/cyan]")
+    orchestrator = AgentOrchestrator(
+        brains=brains,
+        ledger=ledger,
+        action_log=action_log,
+        cycle_s=args.cycle_seconds,
+        max_cycles=args.cycles,
+        print=lambda msg: console.print(msg),
+    )
+    try:
+        orchestrator.run_forever()
+    except KeyboardInterrupt:
+        console.print("[yellow]agent loop interrupted[/yellow]")
+        return 130
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="atlas", description="Atlas V1 SportyBet Nigeria intelligence pipeline"
@@ -1131,6 +1190,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Dashboard port (default: ATLAS_PORT, else 8077)",
     )
     run.set_defaults(func=cmd_run)
+
+    ag = sub.add_parser(
+        "agent",
+        help="Run the AI-first agent plane (opencode brain over the WebBridge tab)",
+    )
+    ag.add_argument(
+        "--sessions",
+        default=os.environ.get("ATLAS_AGENT_SESSIONS", "atlas-trader"),
+        help="Comma-separated opencode session names (one per tracked match role)",
+    )
+    ag.add_argument("--model", default=None, help="opencode model (provider/model)")
+    ag.add_argument("--agent-name", default=None, help="opencode agent profile")
+    ag.add_argument(
+        "--attach",
+        default=None,
+        help="Attach to an opencode server, e.g. http://127.0.0.1:4096 "
+             "(session state outlives this process)",
+    )
+    ag.add_argument(
+        "--cycles", type=int, default=None, help="Stop after N cycles (default: forever)"
+    )
+    ag.add_argument(
+        "--cycle-seconds", type=float, default=90.0, help="Seconds between cycles"
+    )
+    ag.add_argument("--ledger", default="data/ops/ledger.jsonl", help="Ledger JSONL path")
+    ag.add_argument(
+        "--daily-loss-limit", type=float, default=-500.0, help="Hard daily stop (NGN)"
+    )
+    ag.add_argument(
+        "--action-log",
+        default="data/ops/agent_actions.jsonl",
+        help="Append-only agent action log path",
+    )
+    ag.set_defaults(func=cmd_agent)
     return p
 
 

@@ -56,6 +56,7 @@ add_file "deploy/vps/units/atlas-backup.service"                "/etc/systemd/sy
 add_file "deploy/vps/units/atlas-backup.timer"                  "/etc/systemd/system/atlas-backup.timer" root 644
 add_file "deploy/vps/units/atlas-docker-prune.service"          "/etc/systemd/system/atlas-docker-prune.service" root 644
 add_file "deploy/vps/units/atlas-docker-prune.timer"            "/etc/systemd/system/atlas-docker-prune.timer" root 644
+add_file "deploy/vps/units/atlas-agent.service"                  "/etc/systemd/system/atlas-agent.service" root 644
 add_file "deploy/vps/units/atlas-browser-recycle.service"       "/etc/systemd/system/atlas-browser-recycle.service" root 644
 add_file "deploy/vps/units/atlas-browser-recycle.timer"         "/etc/systemd/system/atlas-browser-recycle.timer" root 644
 add_file "deploy/vps/units/atlas-cd.service"                     "/etc/systemd/system/atlas-cd.service" root 644

@@ -1,0 +1,56 @@
+[Unit]
+Description=ATLAS agent loop (AI-first: opencode brain over the WebBridge tab)
+ConditionPathExists=/opt/atlas/agent-armed
+Documentation=file:///opt/atlas/atlas/agent/orchestrator.py
+After=network-online.target atlas-browser.service kimi-webbridge.service
+Wants=network-online.target
+# The brain drives the tab through the daemon; neither may be down for a
+# cycle to exist at all.
+Requires=atlas-browser.service kimi-webbridge.service
+# SINGLE-BRAIN INVARIANT: the AI-first agent REPLACES the deterministic
+# loop's decision role. Starting the agent stops the old submit-armed loop
+# (and vice versa via its own Conflicts on this unit).
+Conflicts=atlas-loop.service atlas-shadow.service
+# BOOT-SAFETY GATE: only starts if the operator laid down
+# /opt/atlas/agent-armed. Remove the flag to disarm, once, clean.
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/atlas
+EnvironmentFile=/opt/atlas/.env
+Environment=ATLAS_WEBBRIDGE_DAEMON_URL=http://127.0.0.1:10086/command
+Environment=ATLAS_WEBBRIDGE_AGENT_SESSION=atlas-agent
+# MONEY GATE: the tab tool refuses click/fill/upload while this stays 0 —
+# the agent explores and reasons but cannot spend. Arming is a deliberate
+# operator edit of /opt/atlas/.env (ATLAS_AGENT_MONEY=1), never a flag the
+# agent can flip.
+Environment=ATLAS_AGENT_MONEY=0
+Environment=ATLAS_AGENT_SESSIONS=atlas-trader
+Environment=ATLAS_AGENT_CYCLE_S=90
+# The brain is an opencode CHILD PROCESS. Long reasoning cycles are normal.
+Environment=ATLAS_AGENT_TIMEOUT_S=1800
+# If opencode is not on PATH, pin it here via ATLAS_AGENT_OPENCODE_BIN.
+ExecStart=/opt/atlas/.venv/bin/python -m atlas.main agent \
+  --cycle-seconds 90 \
+  --ledger data/ops/ledger.jsonl \
+  --action-log data/ops/agent_actions.jsonl
+ExecStop=/bin/kill -INT $MAINPID
+Restart=always
+RestartSec=20
+TimeoutStopSec=60
+KillMode=mixed
+KillSignal=SIGINT
+Nice=8
+CPUWeight=50
+MemoryHigh=250M
+MemoryMax=400M
+LogsDirectory=atlas
+StandardOutput=append:/var/log/atlas/agent.log
+StandardError=append:/var/log/atlas/agent.err
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/atlas/data /var/log/atlas
+
+[Install]
+WantedBy=multi-user.target
