@@ -728,6 +728,9 @@ DOM adapter before Phase E sign-off.
   `executor.py` (DirectOrderExecutor: refused without `allow_submit=True`,
   recipe-gated `ATLAS_ORDER_RECIPE`, no POST retries, verified → ledger
   `mark_verified_placed()` stamps the book's createTime epoch-ms as stake time),
+  `verify.py` (independent confirmation via the realbetlist path — exact
+  match on eventId/marketId/outcomeId + stake + odds inside a 15-min
+  creation window; zero or many matches → None → accepted_unverified),
   `seed.py`, `session_probe.py`.
 - Ledger: `BetRecord.placed_at_epoch_ms`; `place_bet()` stamps it; new
   `mark_verified_placed()` overwrites with the book's createTime and appends a
