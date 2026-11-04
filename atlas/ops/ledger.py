@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,7 @@ class BetRecord:
     status: str = "pending"
     pnl_ngn: float = 0.0
     placed_at: Optional[str] = None
+    placed_at_epoch_ms: Optional[int] = None
     settled_at: Optional[str] = None
     settled_odds: Optional[float] = None
     # External settlement (the book's Bet History, written by the recon
@@ -179,9 +181,53 @@ class BetLedger:
             # silently flip the campaign cohort's pre-campaign exclusion.
             if not bet.placed_at:
                 bet.placed_at = datetime.now(timezone.utc).isoformat()
+            if bet.placed_at_epoch_ms is None:
+                # Millisecond precision, the same unit the book's createTime
+                # uses. Wall-clock claim time — for bets VERIFIED against
+                # Bet History, mark_verified_placed() overwrites this with
+                # the book's own createTime (the exact stake time).
+                bet.placed_at_epoch_ms = int(time.time() * 1000)
             self._bets[bet.bet_id] = bet
             self._append(bet, "bet_placed")
             return True
+
+    def mark_verified_placed(
+        self,
+        bet_id: str,
+        *,
+        order_id: str,
+        short_id: Optional[str],
+        create_time_ms: int,
+        odds: Optional[float] = None,
+    ) -> None:
+        """Stamp a ledger bet with the BOOK's own stake time.
+
+        Called after the order is independently verified in Bet History
+        (realbetlist). The book's createTime is the authoritative moment the
+        stake was accepted — it replaces the local wall-clock claim recorded
+        at place_bet() time, and it is the timestamp settlement and cohort
+        accounting must read. Appends a 'bet_verified' event carrying the
+        full updated record.
+        """
+        if not isinstance(create_time_ms, int) or create_time_ms <= 0:
+            raise ValueError(f"create_time_ms must be a positive epoch-ms int, got {create_time_ms!r}")
+        with self._lock:
+            bet = self._bets.get(bet_id)
+            if bet is None:
+                raise KeyError(f"Unknown bet_id: {bet_id}")
+            bet.placed_at = datetime.fromtimestamp(
+                create_time_ms / 1000.0, tz=timezone.utc
+            ).isoformat(timespec="milliseconds")
+            bet.placed_at_epoch_ms = int(create_time_ms)
+            bet.receipt = f"verified:{order_id}" + (f"/{short_id}" if short_id else "")
+            bet.odds_source = "book"
+            if odds is not None:
+                try:
+                    bet.odds = float(odds)
+                except (TypeError, ValueError):
+                    pass
+            self._bets[bet_id] = bet
+            self._append(bet, "bet_verified")
 
     def settle_bet(self, bet_id: str, status: str, settled_odds: float | None = None) -> None:
         if status not in SETTLED_STATUSES:
@@ -325,6 +371,10 @@ class BetLedger:
             correlation_groups=list(bet.get("correlation_groups", [])),
             receipt=bet.get("receipt"),
             odds_source=bet.get("odds_source"),
+            placed_at=bet.get("placed_at"),
+            placed_at_epoch_ms=(
+                int(bet["placed_at_epoch_ms"]) if bet.get("placed_at_epoch_ms") is not None else None
+            ),
         )
         return self.place_bet(rec)
 

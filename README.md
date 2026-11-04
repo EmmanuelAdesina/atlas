@@ -401,6 +401,27 @@ wrong, what does it do?
   mathematical invariants
 - [`docs/bugs_and_issues.md`](docs/bugs_and_issues.md): the open list of
   operational issues, kept current
+- [`docs/browserless-transport-design.md`](docs/browserless-transport-design.md):
+  design + rollout of the direct-HTTP (browserless) transport for SportyBet.
+  Read sensors work today (`python -m atlas.transport.session_probe`,
+  `python -m atlas.transport.sources.settle`); the board read is gated on
+  Phase A recon fixtures. Direct order submission exists only as the disabled
+  `DirectOrderExecutor` (see design §9) — it is not wired into the runner.
+
+## Browserless transport (experimental)
+
+SportyBet has no public API, but its SPA is cookie-authenticated JSON over
+HTTP. `atlas/transport/` talks to it directly: a seeded cookie vault
+(`python -m atlas.transport.seed --cookies cookies.json`), explicit timeout/
+retry discipline (GETs idempotent, POSTs never retried), raw-response
+archiving before parsing, and typed failures (`SessionExpiredError`,
+`OutcomeUnknownError`, `SchemaDriftError`, `UnreadableBoardError`) that keep
+an unreadable book from ever looking like an empty one. Settlement reads
+(`realbetlist`) already produce byte-identical `settle_state.json`. Ledger
+records carry `placed_at_epoch_ms`, and bets verified against Bet History are
+stamped with the book's own `createTime` — the exact moment the stake left
+the account. Chrome remains only as the actuator for live placement until
+the design's Phase A–E gates pass.
 
 ---
 

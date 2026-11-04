@@ -1,0 +1,12 @@
+{
+ "bizCode": 10000,
+ "message": "Success",
+ "data": {
+  "avlBal": 123.45,
+  "status": 1,
+  "avlCoins": 7.0,
+  "coinsStatus": 1,
+  "lastUpdatedTime": 1762160000000,
+  "userFinAccNotExist": false
+ }
+}

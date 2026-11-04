@@ -1,0 +1,158 @@
+{
+ "bizCode": 10000,
+ "isAvailable": true,
+ "message": "Success",
+ "data": {
+  "pageSize": 5,
+  "pageNo": 1,
+  "totalNum": 159,
+  "entityList": [
+   {
+    "orderType": 1,
+    "shortId": "113771",
+    "orderId": "261028111508ord83256905",
+    "totalStake": "100.00",
+    "selectionSize": 1,
+    "totalWinnings": "111.00",
+    "winningStatus": 20,
+    "isPaymentInProgress": false,
+    "createTime": 1793186108668,
+    "selections": [
+     {
+      "id": "261028111508sele32737407",
+      "eventId": "sr:match:75725054",
+      "jointId": "sr:match:75725054/uof:1/sr:sport:1/60021",
+      "sportId": "sr:sport:1",
+      "gameId": "35961",
+      "product": 1,
+      "marketId": "60021",
+      "outcomeId": "76",
+      "status": 1,
+      "matchStatus": "Ended",
+      "eventStatus": 3,
+      "banker": false,
+      "haveLive": true,
+      "odds": "1.11",
+      "marketDesc": "Home Team To Score 3 or More Goals in a Row",
+      "outcomeDesc": "No",
+      "correctOutcome": "No",
+      "home": "FK Pribram B",
+      "away": "SK Benesov",
+      "categoryId": "sr:category:18",
+      "categoryName": "Czechia",
+      "tournamentId": "sr:tournament:14151",
+      "tournamentName": "CFL",
+      "period": "2",
+      "playedSeconds": "90:00",
+      "remainingTimeInPeriod": "00:00",
+      "gameScore": [
+       "0:3",
+       "2:0"
+      ],
+      "setScore": "2:3",
+      "pointScore": "[\"0:3\",\"2:0\"]",
+      "startTime": 1793179800000,
+      "originalProbability": 0.8746971062,
+      "settleType": 0,
+      "bgEvent": false,
+      "matchTrackerNotAllowed": false,
+      "eventSource": {
+       "preMatchSource": {
+        "sourceType": "BET_RADAR",
+        "sourceId": "75725054"
+       },
+       "liveSource": {
+        "sourceType": "BET_GENIUS",
+        "sourceId": "111111114564084"
+       }
+      },
+      "isSportyMoment": false
+     }
+    ],
+    "combinationSize": 1,
+    "shareCode": "LTTNVB",
+    "oddsBoosted": false,
+    "lfbOddsBoosted": false,
+    "paymentType": 0,
+    "isHistory": false,
+    "currency": "NGN",
+    "isEditable": false,
+    "isAutoBet": false,
+    "hasSportyMomentSelection": false,
+    "hasPendingEvent": false
+   },
+   {
+    "orderType": 1,
+    "shortId": "114614",
+    "orderId": "261028110837ord82874814",
+    "totalStake": "100.00",
+    "selectionSize": 1,
+    "totalWinnings": "115.00",
+    "winningStatus": 20,
+    "isPaymentInProgress": false,
+    "createTime": 1793185717739,
+    "selections": [
+     {
+      "id": "261028110837sele29496649",
+      "eventId": "sr:match:74839236",
+      "jointId": "sr:match:74839236/uof:1/sr:sport:1/60012",
+      "sportId": "sr:sport:1",
+      "gameId": "16577",
+      "product": 1,
+      "marketId": "60012",
+      "outcomeId": "76",
+      "status": 1,
+      "matchStatus": "Ended",
+      "eventStatus": 3,
+      "banker": false,
+      "haveLive": true,
+      "odds": "1.15",
+      "marketDesc": "Away Team To Score 2 or More Goals in a Row",
+      "outcomeDesc": "No",
+      "correctOutcome": "No",
+      "home": "Mayak Sarny",
+      "away": "FC Kharkiv",
+      "categoryId": "sr:category:86",
+      "categoryName": "Ukraine",
+      "tournamentId": "sr:tournament:312",
+      "tournamentName": "Ukraine Cup",
+      "period": "2",
+      "playedSeconds": "90:00",
+      "gameScore": [
+       "0:1",
+       "1:1"
+      ],
+      "setScore": "1:2",
+      "startTime": 1793178000000,
+      "originalProbability": 0.8447909891,
+      "settleType": 0,
+      "bgEvent": false,
+      "matchTrackerNotAllowed": false,
+      "eventSource": {
+       "preMatchSource": {
+        "sourceType": "BET_RADAR",
+        "sourceId": "74839236"
+       },
+       "liveSource": {
+        "sourceType": "BET_RADAR",
+        "sourceId": "74839236"
+       }
+      },
+      "isSportyMoment": false
+     }
+    ],
+    "combinationSize": 1,
+    "shareCode": "RXDEG2",
+    "oddsBoosted": false,
+    "lfbOddsBoosted": false,
+    "paymentType": 0,
+    "isHistory": false,
+    "currency": "NGN",
+    "isEditable": false,
+    "isAutoBet": false,
+    "hasSportyMomentSelection": false,
+    "hasPendingEvent": false
+   }
+  ]
+ }
+}

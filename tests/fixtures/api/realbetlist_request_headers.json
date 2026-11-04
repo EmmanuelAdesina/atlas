@@ -1,0 +1,19 @@
+{
+ "referer": "https://www.sportybet.com/ng/my_accounts/bet_history/sport_bets?isSettled=10",
+ "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+ "accept-language": "en",
+ "clientid": "web",
+ "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+ "operid": "2",
+ "platform": "web",
+ "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+ "sec-ch-ua-mobile": "?0",
+ "sec-ch-ua-platform": "\"Windows\"",
+ "accept": "*/*",
+ "accept-encoding": "gzip, deflate, br, zstd",
+ "priority": "u=1, i",
+ "sec-fetch-dest": "empty",
+ "sec-fetch-mode": "same-origin",
+ "sec-fetch-site": "same-origin",
+ "cookie": "<redacted>"
+}
