@@ -19,7 +19,12 @@ from typing import Any
 import pytest
 
 from atlas.agent.action_log import AgentActionLog
-from atlas.agent.brain import BrainError, OpencodeBrain, _harvest_text_lines
+from atlas.agent.brain import (
+    BrainError,
+    OpencodeBrain,
+    SessionIdStore,
+    _harvest_text_lines,
+)
 from atlas.agent.orchestrator import (
     AgentOrchestrator,
     cycle_prompt,
@@ -175,18 +180,19 @@ def test_record_bet_observes_daily_stop(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_brain_argv_contains_session_and_auto():
+def test_brain_argv_create_vs_resume():
     brain = OpencodeBrain(
         session="atlas-trader", model="x/y", agent_name="atlas", attach_url="http://127.0.0.1:4096"
     )
-    argv = brain.argv("cycle prompt")
-    joined = " ".join(argv)
-    assert "--session atlas-trader" in joined
-    assert "--format json" in joined
-    assert "--auto" in joined
-    assert "--attach http://127.0.0.1:4096" in joined
-    assert "--model x/y" in joined
-    assert argv[-1] == "cycle prompt"
+    # CREATE mode: no --session (opencode 1.18.x refuses a nonexistent one)
+    create = " ".join(brain.argv("cycle prompt"))
+    assert "--session" not in create and "--auto" in create and "--title atlas/atlas-trader" in create
+    # RESUME mode: explicit opencode session id
+    resumed = " ".join(brain.argv("cycle prompt", "oc_sess_42"))
+    assert "--session oc_sess_42" in resumed
+    assert "--attach http://127.0.0.1:4096" in resumed
+    assert "--model x/y" in resumed
+    assert brain.argv("cycle prompt")[-1] == "cycle prompt"
 
 
 def test_harvest_text_from_json_events():
@@ -217,9 +223,67 @@ def test_brain_run_extracts_text(monkeypatch, tmp_path):
         return SimpleNamespace(returncode=0, stdout=payload, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    brain = OpencodeBrain(session="s", workdir=str(tmp_path))
+    brain = OpencodeBrain(
+        session="s", workdir=str(tmp_path),
+        id_store=SessionIdStore(str(tmp_path / "ids.json")),
+    )
     assert brain.run("go") == "cycle done"
     assert "go" in captured["argv"]
+
+
+def test_brain_creates_then_resumes_session(monkeypatch, tmp_path):
+    from atlas.agent.brain import SessionIdStore
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if "--session" not in argv:
+            out = json.dumps({"sessionID": "oc_123"}) + "\n" + json.dumps(
+                {"type": "text", "part": {"text": "first"}}
+            ) + "\n"
+            return SimpleNamespace(returncode=0, stdout=out, stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"type": "text", "part": {"text": "resumed"}}) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    store = SessionIdStore(str(tmp_path / "ids.json"))
+    brain = OpencodeBrain(session="s", workdir=str(tmp_path), id_store=store)
+    assert brain.run("go") == "first"
+    assert "--session" not in calls[0]  # created, not resumed
+    assert store.get("s") == "oc_123"
+    assert brain.run("again") == "resumed"
+    assert "--session" in calls[1] and "oc_123" in calls[1]
+
+
+def test_brain_falls_back_when_session_not_found(monkeypatch, tmp_path):
+    from atlas.agent.brain import SessionIdStore
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if "--session" in argv:
+            return SimpleNamespace(
+                returncode=1, stdout="", stderr="Error: Session not found\n"
+            )
+        out = json.dumps({"sessionID": "oc_new"}) + "\n"
+        return SimpleNamespace(
+            returncode=0,
+            stdout=out + json.dumps({"type": "text", "part": {"text": "fresh"}}) + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    store = SessionIdStore(str(tmp_path / "ids.json"))
+    store.put("s", "oc_stale")
+    brain = OpencodeBrain(session="s", workdir=str(tmp_path), id_store=store)
+    assert brain.run("go") == "fresh"
+    assert len(calls) == 2 and calls[1] != calls[0]
+    assert store.get("s") == "oc_new"
 
 
 def test_brain_run_raises_on_exit_code(monkeypatch):
